@@ -377,7 +377,6 @@ mod tests {
             destination: vec![Destination {
                 name: "aliyun".into(),
                 endpoint: "oss-cn-hangzhou.aliyuncs.com".into(),
-                internal: false,
                 bucket: "b".into(),
                 prefix: Some("backups".into()),
                 access_key_id: "id".into(),

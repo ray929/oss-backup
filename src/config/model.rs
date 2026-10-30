@@ -30,8 +30,6 @@ pub struct Global {
 pub struct Destination {
     pub name: String,
     pub endpoint: String,
-    #[serde(default)]
-    pub internal: bool,
     pub bucket: String,
     pub prefix: Option<String>,
     pub access_key_id: String,

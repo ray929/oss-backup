@@ -12,7 +12,7 @@ pub struct OssStore {
 
 impl OssStore {
     pub fn new(destination: &Destination, timeout: Duration) -> Result<Self> {
-        let endpoint = normalize_endpoint(&destination.endpoint, destination.internal);
+        let endpoint = normalize_endpoint(&destination.endpoint);
         let builder = Oss::default()
             .endpoint(&endpoint)
             .bucket(&destination.bucket)
@@ -79,21 +79,15 @@ impl OssStore {
     }
 }
 
-/// 统一 endpoint 形态；`internal = true` 时改用内网域名
-pub fn normalize_endpoint(endpoint: &str, internal: bool) -> String {
+/// 统一 endpoint 形态：只补全协议并去掉末尾 `/`，不改写主机名。
+///
+/// 内网访问由用户直接写 `-internal` 域名，工具不代做改写。
+pub fn normalize_endpoint(endpoint: &str) -> String {
     let trimmed = endpoint.trim().trim_end_matches('/');
-    let with_scheme = if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
         trimmed.to_string()
     } else {
         format!("https://{trimmed}")
-    };
-
-    if internal {
-        with_scheme
-            .replace("-internal.aliyuncs.com", ".aliyuncs.com")
-            .replace(".aliyuncs.com", "-internal.aliyuncs.com")
-    } else {
-        with_scheme.replace("-internal.aliyuncs.com", ".aliyuncs.com")
     }
 }
 
@@ -104,7 +98,7 @@ mod tests {
     #[test]
     fn adds_scheme_when_missing() {
         assert_eq!(
-            normalize_endpoint("oss-cn-hangzhou.aliyuncs.com", false),
+            normalize_endpoint("oss-cn-hangzhou.aliyuncs.com"),
             "https://oss-cn-hangzhou.aliyuncs.com"
         );
     }
@@ -112,28 +106,28 @@ mod tests {
     #[test]
     fn keeps_existing_scheme() {
         assert_eq!(
-            normalize_endpoint("https://oss-cn-hangzhou.aliyuncs.com/", false),
+            normalize_endpoint("https://oss-cn-hangzhou.aliyuncs.com/"),
             "https://oss-cn-hangzhou.aliyuncs.com"
         );
     }
 
     #[test]
-    fn switches_to_internal() {
+    fn keeps_internal_endpoint_untouched() {
         assert_eq!(
-            normalize_endpoint("https://oss-cn-hangzhou.aliyuncs.com", true),
+            normalize_endpoint("https://oss-cn-hangzhou-internal.aliyuncs.com"),
+            "https://oss-cn-hangzhou-internal.aliyuncs.com"
+        );
+        assert_eq!(
+            normalize_endpoint("oss-cn-hangzhou-internal.aliyuncs.com"),
             "https://oss-cn-hangzhou-internal.aliyuncs.com"
         );
     }
 
     #[test]
-    fn internal_is_idempotent() {
+    fn keeps_custom_domain_untouched() {
         assert_eq!(
-            normalize_endpoint("https://oss-cn-hangzhou-internal.aliyuncs.com", true),
-            "https://oss-cn-hangzhou-internal.aliyuncs.com"
-        );
-        assert_eq!(
-            normalize_endpoint("https://oss-cn-hangzhou-internal.aliyuncs.com", false),
-            "https://oss-cn-hangzhou.aliyuncs.com"
+            normalize_endpoint("oss.example.com"),
+            "https://oss.example.com"
         );
     }
 }
