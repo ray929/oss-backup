@@ -1,5 +1,5 @@
 use crate::archive::tar_zstd;
-use crate::config::{Backup, BackupSettings, Config, MysqlCfg, PgsqlCfg, SqliteCfg};
+use crate::config::{Backup, BackupSettings, Config, MysqlCfg, PgsqlCfg};
 use crate::db;
 use crate::manifest::{self, Manifest, ManifestObject};
 use crate::naming::{self, DbKind};
@@ -22,15 +22,15 @@ pub async fn run_backup(cfg: &Config, backup: &Backup, dry_run: bool) -> Result<
     let store = OssStore::new(destination, Duration::from_secs(settings.timeout_secs))?;
 
     let prefix = destination.prefix.as_deref();
-    let backup_prefix = naming::backup_prefix(prefix, &backup.name);
+    let run_prefix = naming::run_prefix(prefix, &destination.name);
     let started_at = Local::now();
     let timestamp = started_at.format(naming::TIMESTAMP_FORMAT).to_string();
-    let run_dir = naming::run_dir(prefix, &backup.name, &timestamp);
+    let run_dir = naming::run_dir(prefix, &destination.name, &timestamp);
     let part_size = settings.part_size_mb as usize * 1024 * 1024;
 
     if dry_run {
         store
-            .probe(&backup_prefix)
+            .probe(&run_prefix)
             .await
             .context("dry-run 连通性检查失败")?;
         for (object, source) in planned_objects(backup) {
@@ -40,8 +40,8 @@ pub async fn run_backup(cfg: &Config, backup: &Backup, dry_run: bool) -> Result<
                 "计划写入"
             );
         }
-        if let Some(file) = &backup.file {
-            let (count, bytes) = estimate_file(file)?;
+        if !backup.file.is_empty() {
+            let (count, bytes) = estimate_file(&backup.file)?;
             let parts = bytes as usize / part_size + 1;
             if parts > 10000 {
                 bail!("预估约 {parts} 个分片，超过 OSS 的 10000 片上限，请调大 part_size_mb");
@@ -55,8 +55,8 @@ pub async fn run_backup(cfg: &Config, backup: &Backup, dry_run: bool) -> Result<
     }
 
     let mut objects = Vec::new();
-    if let Some(file) = &backup.file {
-        objects.extend(run_file(&store, backup, file, &settings, &run_dir).await?);
+    if !backup.file.is_empty() {
+        objects.extend(run_file(&store, &backup.file, &settings, &run_dir).await?);
     }
     if let Some(mysql) = &backup.mysql {
         let dump_path = cfg.mysqldump_path().to_string();
@@ -66,20 +66,19 @@ pub async fn run_backup(cfg: &Config, backup: &Backup, dry_run: bool) -> Result<
         let dump_path = cfg.pg_dump_path().to_string();
         objects.extend(run_pgsql(&store, backup, pgsql, &settings, &run_dir, &dump_path).await?);
     }
-    if let Some(sqlite) = &backup.sqlite {
+    if !backup.sqlite.is_empty() {
         let sqlite3_path = cfg.sqlite3_path().to_string();
         objects
-            .extend(run_sqlite(&store, backup, sqlite, &settings, &run_dir, &sqlite3_path).await?);
+            .extend(run_sqlite(&store, &backup.sqlite, &settings, &run_dir, &sqlite3_path).await?);
     }
     if objects.is_empty() {
-        bail!("backup '{}' 没有可执行的备份类型", backup.name);
+        bail!("backup '{}' 没有可执行的备份类型", backup.destination);
     }
 
     let finished_at = Local::now();
     let total_bytes: u64 = objects.iter().map(|o| o.size).sum();
     let kind = kinds_of(backup);
     let manifest = Manifest::new(
-        &backup.name,
         &kind,
         &backup.destination,
         started_at.to_rfc3339(),
@@ -96,7 +95,7 @@ pub async fn run_backup(cfg: &Config, backup: &Backup, dry_run: bool) -> Result<
         .context("上传 manifest 失败")?;
 
     info!(
-        backup = %backup.name,
+        destination = %destination.name,
         objects = objects.len(),
         bytes = total_bytes,
         run = %run_dir,
@@ -104,7 +103,7 @@ pub async fn run_backup(cfg: &Config, backup: &Backup, dry_run: bool) -> Result<
     );
 
     if settings.retain_count > 0 {
-        retention::apply(&store, &backup_prefix, settings.retain_count).await?;
+        retention::apply(&store, &run_prefix, settings.retain_count).await?;
     }
 
     Ok(RunSummary {
@@ -115,23 +114,27 @@ pub async fn run_backup(cfg: &Config, backup: &Backup, dry_run: bool) -> Result<
 
 async fn run_file(
     store: &OssStore,
-    backup: &Backup,
-    file: &crate::config::FileCfg,
+    file: &[crate::config::FileCfg],
     settings: &BackupSettings,
     run_dir: &str,
 ) -> Result<Vec<ManifestObject>> {
     let key = format!("{run_dir}/{}", naming::FILE_OBJECT);
-    let paths = file.local_path.clone();
-    let exclude = file.exclude.clone();
+    let sources: Vec<tar_zstd::Source> = file
+        .iter()
+        .map(|spec| tar_zstd::Source {
+            root: spec.local_path.clone(),
+            exclude: spec.exclude.clone(),
+        })
+        .collect();
     let level = settings.zstd_level;
     let passphrase = settings.passphrase.clone();
     let part_size = settings.part_size_mb as usize * 1024 * 1024;
 
     let stats = upload_stream(store.operator(), &key, part_size, move |sink| {
-        tar_zstd::produce(sink, &paths, &exclude, level, &passphrase)
+        tar_zstd::produce(sink, &sources, level, &passphrase)
     })
     .await
-    .with_context(|| format!("文件备份失败：{}", backup.name))?;
+    .context("文件备份失败")?;
 
     info!(key = %key, bytes = stats.bytes, entries = stats.entries, "已上传文件归档");
 
@@ -240,8 +243,7 @@ async fn run_pgsql(
 
 async fn run_sqlite(
     store: &OssStore,
-    backup: &Backup,
-    sqlite: &SqliteCfg,
+    sqlite: &[std::path::PathBuf],
     settings: &BackupSettings,
     run_dir: &str,
     sqlite3_path: &str,
@@ -249,7 +251,7 @@ async fn run_sqlite(
     let mut objects = Vec::new();
     let part_size = settings.part_size_mb as usize * 1024 * 1024;
 
-    for database in &sqlite.database {
+    for database in sqlite {
         let object = naming::sqlite_object_name(database);
         let key = format!("{run_dir}/{object}");
         let db_path = database.clone();
@@ -274,13 +276,12 @@ async fn run_sqlite(
         });
     }
 
-    let _ = backup;
     Ok(objects)
 }
 
 fn kinds_of(backup: &Backup) -> String {
     let mut kinds = Vec::new();
-    if backup.file.is_some() {
+    if !backup.file.is_empty() {
         kinds.push("file");
     }
     if backup.mysql.is_some() {
@@ -289,7 +290,7 @@ fn kinds_of(backup: &Backup) -> String {
     if backup.pgsql.is_some() {
         kinds.push("pgsql");
     }
-    if backup.sqlite.is_some() {
+    if !backup.sqlite.is_empty() {
         kinds.push("sqlite");
     }
     kinds.join("+")
@@ -297,9 +298,11 @@ fn kinds_of(backup: &Backup) -> String {
 
 fn inputs_of(backup: &Backup) -> Vec<String> {
     let mut out = Vec::new();
-    if let Some(file) = &backup.file {
-        out.extend(file.local_path.iter().map(|p| p.display().to_string()));
-        out.extend(file.exclude.iter().map(|e| format!("exclude:{e}")));
+    for spec in &backup.file {
+        out.push(spec.local_path.display().to_string());
+        for pattern in &spec.exclude {
+            out.push(format!("exclude:{}:{pattern}", spec.local_path.display()));
+        }
     }
     if let Some(mysql) = &backup.mysql {
         out.extend(mysql.database.iter().cloned());
@@ -307,15 +310,13 @@ fn inputs_of(backup: &Backup) -> Vec<String> {
     if let Some(pgsql) = &backup.pgsql {
         out.extend(pgsql.database.iter().cloned());
     }
-    if let Some(sqlite) = &backup.sqlite {
-        out.extend(sqlite.database.iter().map(|p| p.display().to_string()));
-    }
+    out.extend(backup.sqlite.iter().map(|p| p.display().to_string()));
     out
 }
 
 fn planned_objects(backup: &Backup) -> Vec<(String, Option<String>)> {
     let mut out = Vec::new();
-    if backup.file.is_some() {
+    if !backup.file.is_empty() {
         out.push((naming::FILE_OBJECT.to_string(), None));
     }
     if let Some(mysql) = &backup.mysql {
@@ -332,26 +333,25 @@ fn planned_objects(backup: &Backup) -> Vec<(String, Option<String>)> {
                 .map(|db| (naming::db_object_name(DbKind::Pgsql, &db), Some(db))),
         );
     }
-    if let Some(sqlite) = &backup.sqlite {
-        out.extend(
-            sqlite
-                .database
-                .iter()
-                .map(|p| (naming::sqlite_object_name(p), Some(p.display().to_string()))),
-        );
-    }
+    out.extend(
+        backup
+            .sqlite
+            .iter()
+            .map(|p| (naming::sqlite_object_name(p), Some(p.display().to_string()))),
+    );
     out
 }
 
-fn estimate_file(file: &crate::config::FileCfg) -> Result<(u64, u64)> {
-    let exclude = tar_zstd::exclude_set(&file.exclude)?;
+fn estimate_file(file: &[crate::config::FileCfg]) -> Result<(u64, u64)> {
     let mut count = 0u64;
     let mut bytes = 0u64;
 
-    for root in &file.local_path {
+    for spec in file {
+        let root = &spec.local_path;
         if !root.exists() {
             bail!("备份路径不存在：{}", root.display());
         }
+        let exclude = tar_zstd::exclude_set(&spec.exclude)?;
         for entry in WalkDir::new(root).follow_links(false) {
             let entry = entry.with_context(|| format!("遍历目录失败：{}", root.display()))?;
             if !entry.file_type().is_file() {
@@ -405,7 +405,6 @@ mod tests {
     #[test]
     fn planned_objects_for_sqlite_follow_paths() {
         let backup = Backup {
-            name: "cache".into(),
             destination: "aliyun".into(),
             retain_count: None,
             zstd_level: None,
@@ -413,12 +412,10 @@ mod tests {
             timeout_secs: None,
             age_passphrase: None,
             age_passphrase_file: None,
-            file: None,
+            file: vec![],
             mysql: None,
             pgsql: None,
-            sqlite: Some(SqliteCfg {
-                database: vec![PathBuf::from(r"D:\a\app.db"), PathBuf::from(r"D:\b\app.db")],
-            }),
+            sqlite: vec![PathBuf::from(r"D:\a\app.db"), PathBuf::from(r"D:\b\app.db")],
         };
         let planned = planned_objects(&backup);
         assert_eq!(planned.len(), 2);
@@ -426,10 +423,9 @@ mod tests {
     }
 
     #[test]
-    fn kind_is_detected() {
+    fn kinds_combine_file_and_sqlite() {
         let mut cfg = config_with_file();
         let backup = Backup {
-            name: "docs".into(),
             destination: "aliyun".into(),
             retain_count: None,
             zstd_level: None,
@@ -437,16 +433,39 @@ mod tests {
             timeout_secs: None,
             age_passphrase: None,
             age_passphrase_file: None,
-            file: Some(FileCfg {
-                local_path: vec![PathBuf::from(r"D:\docs")],
-                exclude: vec![],
-            }),
+            file: vec![FileCfg {
+                local_path: PathBuf::from(r"D:\docs"),
+                exclude: vec!["*.tmp".into()],
+            }],
             mysql: None,
             pgsql: None,
-            sqlite: None,
+            sqlite: vec![PathBuf::from(r"D:\a\app.db")],
         };
         cfg.backup.push(backup);
-        assert_eq!(kinds_of(&cfg.backup[0]), "file");
-        assert_eq!(planned_objects(&cfg.backup[0]).len(), 1);
+        assert_eq!(kinds_of(&cfg.backup[0]), "file+sqlite");
+        assert_eq!(planned_objects(&cfg.backup[0]).len(), 2);
+    }
+
+    #[test]
+    fn inputs_carry_excludes_per_source() {
+        let backup = Backup {
+            destination: "aliyun".into(),
+            retain_count: None,
+            zstd_level: None,
+            part_size_mb: None,
+            timeout_secs: None,
+            age_passphrase: None,
+            age_passphrase_file: None,
+            file: vec![FileCfg {
+                local_path: PathBuf::from(r"D:\docs"),
+                exclude: vec!["*.tmp".into()],
+            }],
+            mysql: None,
+            pgsql: None,
+            sqlite: vec![],
+        };
+        let inputs = inputs_of(&backup);
+        assert_eq!(inputs[0], r"D:\docs");
+        assert_eq!(inputs[1], r"exclude:D:\docs:*.tmp");
     }
 }

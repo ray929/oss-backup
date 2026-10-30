@@ -24,14 +24,14 @@ pub fn is_valid_name(s: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
-/// 运行目录：`{prefix}/{backup}/{timestamp}`
-pub fn run_dir(prefix: Option<&str>, backup_name: &str, timestamp: &str) -> String {
-    join_key(&[prefix.unwrap_or(""), backup_name, timestamp])
+/// 运行目录：`{prefix}/{destination}/{timestamp}`
+pub fn run_dir(prefix: Option<&str>, destination: &str, timestamp: &str) -> String {
+    join_key(&[prefix.unwrap_or(""), destination, timestamp])
 }
 
-/// backup 项的列举前缀：`{prefix}/{backup}/`
-pub fn backup_prefix(prefix: Option<&str>, backup_name: &str) -> String {
-    format!("{}/", join_key(&[prefix.unwrap_or(""), backup_name]))
+/// 该 destination 的列举前缀：`{prefix}/{destination}/`
+pub fn run_prefix(prefix: Option<&str>, destination: &str) -> String {
+    format!("{}/", join_key(&[prefix.unwrap_or(""), destination]))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,7 +140,7 @@ mod tests {
             run_dir(None, "docs", "20260101_010101"),
             "docs/20260101_010101"
         );
-        assert_eq!(backup_prefix(Some("backups"), "docs"), "backups/docs/");
+        assert_eq!(run_prefix(Some("backups"), "docs"), "backups/docs/");
     }
 
     #[test]

@@ -1,23 +1,28 @@
 use crate::archive::{age, ChunkSink, ProduceStats};
 use anyhow::{Context, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tar::Builder;
 use walkdir::WalkDir;
 
+/// 一个文件源及其专属排除规则
+pub struct Source {
+    pub root: PathBuf,
+    pub exclude: Vec<String>,
+}
+
 /// 文件类备份：walkdir → exclude 过滤 → tar → zstd → age → sink
+///
+/// 每个源使用自己的排除规则；归档条目名带源路径前缀，多个源下的同名文件不会互相覆盖。
 pub fn produce(
     sink: ChunkSink,
-    local_paths: &[PathBuf],
-    exclude: &[String],
+    sources: &[Source],
     level: i32,
     passphrase: &str,
 ) -> Result<ProduceStats> {
-    let exclude_set = exclude_set(exclude)?;
-
-    for root in local_paths {
-        if !root.exists() {
-            anyhow::bail!("备份路径不存在：{}", root.display());
+    for source in sources {
+        if !source.root.exists() {
+            anyhow::bail!("备份路径不存在：{}", source.root.display());
         }
     }
 
@@ -29,14 +34,16 @@ pub fn produce(
     let mut entries = 0u64;
     let mut plaintext_bytes = 0u64;
 
-    for root in local_paths {
-        for entry in WalkDir::new(root).follow_links(false) {
-            let entry = entry.with_context(|| format!("遍历目录失败：{}", root.display()))?;
+    for source in sources {
+        let exclude_set = exclude_set(&source.exclude)?;
+        for entry in WalkDir::new(&source.root).follow_links(false) {
+            let entry =
+                entry.with_context(|| format!("遍历目录失败：{}", source.root.display()))?;
             if !entry.file_type().is_file() {
                 continue;
             }
             let path = entry.path();
-            let relative = path.strip_prefix(root).unwrap_or(path);
+            let relative = path.strip_prefix(&source.root).unwrap_or(path);
             let rel = relative.to_string_lossy().replace('\\', "/");
 
             if exclude_set.is_match(&rel) {
@@ -47,7 +54,7 @@ pub fn produce(
             plaintext_bytes += entry.metadata().map(|m| m.len()).unwrap_or_default();
 
             // 用根路径做前缀，避免多个 local_path 下同名文件互相覆盖
-            let name = archive_name(root, &rel);
+            let name = archive_name(&source.root, &rel);
             tar.append_path_with_name(path, &name)
                 .with_context(|| format!("打包文件失败：{}", path.display()))?;
             entries += 1;
@@ -66,7 +73,7 @@ pub fn produce(
 }
 
 /// 把 `D:\Documents\a.txt` 变成 `D__Documents/a.txt`
-fn archive_name(root: &std::path::Path, relative: &str) -> String {
+fn archive_name(root: &Path, relative: &str) -> String {
     let prefix = root
         .to_string_lossy()
         .replace(['/', '\\', ':'], "_")
@@ -106,14 +113,21 @@ mod tests {
 
     const PASSPHRASE: &str = "test-passphrase";
 
-    fn produce_collect(paths: &[PathBuf], exclude: &[String]) -> (ProduceStats, Vec<u8>) {
+    fn produce_collect(sources: &[Source]) -> (ProduceStats, Vec<u8>) {
         let (tx, mut rx) = mpsc::channel::<Vec<u8>>(16);
-        let stats = produce(ChunkSink::new(tx), paths, exclude, 3, PASSPHRASE).unwrap();
+        let stats = produce(ChunkSink::new(tx), sources, 3, PASSPHRASE).unwrap();
         let mut out = Vec::new();
         while let Ok(chunk) = rx.try_recv() {
             out.extend_from_slice(&chunk);
         }
         (stats, out)
+    }
+
+    fn source(root: &std::path::Path, exclude: &[&str]) -> Source {
+        Source {
+            root: root.to_path_buf(),
+            exclude: exclude.iter().map(|s| s.to_string()).collect(),
+        }
     }
 
     fn decrypt_and_list(ciphertext: &[u8]) -> Vec<String> {
@@ -144,10 +158,8 @@ mod tests {
         std::fs::write(dir.path().join("drop.tmp"), b"bye").unwrap();
         std::fs::write(dir.path().join("node_modules/x.js"), b"js").unwrap();
 
-        let (stats, ciphertext) = produce_collect(
-            &[dir.path().to_path_buf()],
-            &["node_modules".into(), "*.tmp".into()],
-        );
+        let (stats, ciphertext) =
+            produce_collect(&[source(dir.path(), &["node_modules", "*.tmp"])]);
         assert_eq!(stats.entries, 1);
         assert_eq!(stats.plaintext_bytes, Some(5));
 
@@ -161,14 +173,31 @@ mod tests {
     }
 
     #[test]
+    fn excludes_apply_per_source() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        std::fs::write(a.path().join("keep.txt"), b"a").unwrap();
+        std::fs::write(a.path().join("drop.tmp"), b"a").unwrap();
+        std::fs::write(b.path().join("keep.tmp"), b"b").unwrap();
+
+        // 同一个 *.tmp 规则只作用于源 a，源 b 的 keep.tmp 应保留
+        let (stats, ciphertext) =
+            produce_collect(&[source(a.path(), &["*.tmp"]), source(b.path(), &[])]);
+        assert_eq!(stats.entries, 2);
+
+        let names = decrypt_and_list(&ciphertext);
+        assert_eq!(names.len(), 2);
+        assert!(names.iter().any(|n| n.ends_with("keep.tmp")));
+    }
+
+    #[test]
     fn multiple_roots_do_not_collide() {
         let a = tempfile::tempdir().unwrap();
         let b = tempfile::tempdir().unwrap();
         std::fs::write(a.path().join("same.txt"), b"a").unwrap();
         std::fs::write(b.path().join("same.txt"), b"b").unwrap();
 
-        let (stats, ciphertext) =
-            produce_collect(&[a.path().to_path_buf(), b.path().to_path_buf()], &[]);
+        let (stats, ciphertext) = produce_collect(&[source(a.path(), &[]), source(b.path(), &[])]);
         assert_eq!(stats.entries, 2);
 
         let names = decrypt_and_list(&ciphertext);
@@ -179,7 +208,7 @@ mod tests {
     #[test]
     fn empty_directory_produces_empty_archive() {
         let dir = tempfile::tempdir().unwrap();
-        let (stats, ciphertext) = produce_collect(&[dir.path().to_path_buf()], &[]);
+        let (stats, ciphertext) = produce_collect(&[source(dir.path(), &[])]);
         assert_eq!(stats.entries, 0);
         assert_eq!(stats.plaintext_bytes, Some(0));
         assert!(decrypt_and_list(&ciphertext).is_empty());
@@ -187,17 +216,25 @@ mod tests {
 
     #[test]
     fn archive_name_encodes_root() {
-        let name = archive_name(std::path::Path::new(r"D:\Documents"), "a/b.txt");
+        let name = archive_name(Path::new(r"D:\Documents"), "a/b.txt");
         assert_eq!(name, "D__Documents/a/b.txt");
-        let single = archive_name(std::path::Path::new(r"D:\config.ini"), "");
+        let single = archive_name(Path::new(r"D:\config.ini"), "");
         assert_eq!(single, "D__config.ini");
     }
 
     #[test]
     fn missing_path_is_error() {
         let (tx, _rx) = mpsc::channel::<Vec<u8>>(4);
-        let missing = PathBuf::from(r"D:\definitely-not-exists");
-        let err = produce(ChunkSink::new(tx), &[missing], &[], 3, PASSPHRASE).unwrap_err();
+        let err = produce(
+            ChunkSink::new(tx),
+            &[Source {
+                root: PathBuf::from(r"D:\definitely-not-exists"),
+                exclude: Vec::new(),
+            }],
+            3,
+            PASSPHRASE,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("备份路径不存在"));
     }
 
@@ -207,8 +244,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let err = produce(
             ChunkSink::new(tx),
-            &[dir.path().to_path_buf()],
-            &["[".into()],
+            &[source(dir.path(), &["["])],
             3,
             PASSPHRASE,
         )

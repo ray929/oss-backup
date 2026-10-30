@@ -62,15 +62,15 @@ async fn run() -> i32 {
     for backup in &cfg.backup {
         match backup::run_backup(&cfg, backup, args.dry_run).await {
             Ok(summary) => info!(
-                backup = %backup.name,
+                destination = %backup.destination,
                 objects = summary.objects,
                 bytes = summary.total_bytes,
                 "备份项完成"
             ),
             Err(err) => {
-                error!(backup = %backup.name, "备份失败：{err:#}");
+                error!(destination = %backup.destination, "备份失败：{err:#}");
                 failures.push(notify::NotifyFailure {
-                    name: backup.name.clone(),
+                    name: backup.destination.clone(),
                     error: format!("{err:#}"),
                 });
             }

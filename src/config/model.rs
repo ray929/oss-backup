@@ -42,7 +42,6 @@ pub struct Destination {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Backup {
-    pub name: String,
     pub destination: String,
     pub retain_count: Option<usize>,
     pub zstd_level: Option<i32>,
@@ -50,16 +49,19 @@ pub struct Backup {
     pub timeout_secs: Option<u64>,
     pub age_passphrase: Option<String>,
     pub age_passphrase_file: Option<PathBuf>,
-    pub file: Option<FileCfg>,
+    /// 文件源列表，每个源带自己的排除规则
+    #[serde(default, deserialize_with = "one_or_many")]
+    pub file: Vec<FileCfg>,
     pub mysql: Option<MysqlCfg>,
     pub pgsql: Option<PgsqlCfg>,
-    pub sqlite: Option<SqliteCfg>,
+    /// SQLite 数据库文件列表
+    #[serde(default, deserialize_with = "one_or_many")]
+    pub sqlite: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct FileCfg {
-    #[serde(deserialize_with = "one_or_many")]
-    pub local_path: Vec<PathBuf>,
+    pub local_path: PathBuf,
     #[serde(default, deserialize_with = "one_or_many")]
     pub exclude: Vec<String>,
 }
@@ -86,12 +88,6 @@ pub struct PgsqlCfg {
     #[serde(deserialize_with = "one_or_many")]
     pub database: Vec<String>,
     pub ssl_mode: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct SqliteCfg {
-    #[serde(deserialize_with = "one_or_many")]
-    pub database: Vec<PathBuf>,
 }
 
 fn default_mysql_port() -> u16 {

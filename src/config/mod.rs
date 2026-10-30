@@ -71,17 +71,8 @@ impl Config {
             }
         }
 
-        let mut backup_names = HashSet::new();
+        let mut backup_destinations = HashSet::new();
         for (idx, backup) in self.backup.iter().enumerate() {
-            if !crate::naming::is_valid_name(&backup.name) {
-                bail!(
-                    "backup[{idx}] 名称 '{}' 非法（只允许字母、数字、点、下划线、短横线）",
-                    backup.name
-                );
-            }
-            if !backup_names.insert(backup.name.as_str()) {
-                bail!("backup 名称重复：{}", backup.name);
-            }
             if !self
                 .destination
                 .iter()
@@ -92,21 +83,27 @@ impl Config {
                     backup.destination
                 );
             }
+            if !backup_destinations.insert(backup.destination.as_str()) {
+                bail!(
+                    "destination '{}' 被多个 [[backup]] 引用；运行目录按 destination 分段，一个 destination 只能对应一个 [[backup]]",
+                    backup.destination
+                );
+            }
 
             let kinds = [
-                backup.file.is_some(),
+                !backup.file.is_empty(),
                 backup.mysql.is_some(),
                 backup.pgsql.is_some(),
-                backup.sqlite.is_some(),
+                !backup.sqlite.is_empty(),
             ];
             let count = kinds.iter().filter(|v| **v).count();
             if count == 0 {
                 bail!("backup[{idx}] 必须包含 file / mysql / pgsql / sqlite 至少一种");
             }
 
-            if let Some(file) = &backup.file {
-                if file.local_path.is_empty() {
-                    bail!("backup[{idx}].file.local_path 不能为空");
+            for (spec_idx, file) in backup.file.iter().enumerate() {
+                if file.local_path.as_os_str().is_empty() {
+                    bail!("backup[{idx}].file[{spec_idx}].local_path 不能为空");
                 }
             }
             if let Some(mysql) = &backup.mysql {
@@ -117,11 +114,6 @@ impl Config {
             if let Some(pgsql) = &backup.pgsql {
                 if pgsql.database.is_empty() {
                     bail!("backup[{idx}].pgsql.database 不能为空");
-                }
-            }
-            if let Some(sqlite) = &backup.sqlite {
-                if sqlite.database.is_empty() {
-                    bail!("backup[{idx}].sqlite.database 不能为空");
                 }
             }
 
@@ -287,20 +279,51 @@ access_key_id = "id"
 access_key_secret = "sec"
 
 [[backup]]
-name = "docs"
 destination = "aliyun"
 
-[backup.file]
+[[backup.file]]
 local_path = "D:/docs"
+exclude = ["node_modules", "*.tmp"]
 "#;
         toml::from_str(text).expect("config should parse")
     }
 
     #[test]
-    fn parses_single_value_and_array() {
+    fn parses_file_sources_with_own_excludes() {
         let cfg = minimal();
-        assert_eq!(cfg.backup[0].file.as_ref().unwrap().local_path.len(), 1);
-        assert!(cfg.backup[0].file.as_ref().unwrap().exclude.is_empty());
+        assert_eq!(cfg.backup[0].file.len(), 1);
+        assert_eq!(cfg.backup[0].file[0].local_path, PathBuf::from("D:/docs"));
+        assert_eq!(cfg.backup[0].file[0].exclude.len(), 2);
+    }
+
+    #[test]
+    fn parses_multiple_file_sources() {
+        let cfg: Config = toml::from_str(
+            r#"
+[global]
+age_passphrase = "pw"
+
+[[destination]]
+name = "aliyun"
+endpoint = "e"
+bucket = "b"
+access_key_id = "id"
+access_key_secret = "sec"
+
+[[backup]]
+destination = "aliyun"
+
+[[backup.file]]
+local_path = "D:/a"
+exclude = ["*.tmp"]
+
+[[backup.file]]
+local_path = "D:/b"
+"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.backup[0].file.len(), 2);
+        assert!(cfg.backup[0].file[1].exclude.is_empty());
     }
 
     #[test]
@@ -328,27 +351,23 @@ local_path = "D:/docs"
     #[test]
     fn allows_multiple_payloads() {
         let mut cfg = minimal();
-        cfg.backup[0].sqlite = Some(SqliteCfg {
-            database: vec![PathBuf::from("a.db")],
-        });
+        cfg.backup[0].sqlite = vec![PathBuf::from("a.db")];
         assert!(cfg.validate().is_ok());
     }
 
     #[test]
     fn rejects_no_payload() {
         let mut cfg = minimal();
-        cfg.backup[0].file = None;
+        cfg.backup[0].file.clear();
         assert!(cfg.validate().is_err());
     }
 
     #[test]
-    fn rejects_duplicate_backup_name() {
+    fn rejects_duplicate_destination() {
         let mut cfg = minimal();
         let mut second = cfg.backup[0].clone();
-        second.file = None;
-        second.sqlite = Some(SqliteCfg {
-            database: vec![PathBuf::from("a.db")],
-        });
+        second.file.clear();
+        second.sqlite = vec![PathBuf::from("a.db")];
         cfg.backup.push(second);
         assert!(cfg.validate().is_err());
     }

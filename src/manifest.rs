@@ -2,7 +2,7 @@ use crate::storage::OssStore;
 use anyhow::{Context, Result};
 use serde::Serialize;
 
-pub const MANIFEST_VERSION: u32 = 1;
+pub const MANIFEST_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ManifestObject {
@@ -20,7 +20,6 @@ pub struct ManifestObject {
 #[derive(Debug, Serialize)]
 pub struct Manifest<'a> {
     pub version: u32,
-    pub backup: &'a str,
     pub kind: &'a str,
     pub destination: &'a str,
     pub started_at: String,
@@ -37,7 +36,6 @@ pub struct Manifest<'a> {
 impl<'a> Manifest<'a> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        backup: &'a str,
         kind: &'a str,
         destination: &'a str,
         started_at: String,
@@ -55,7 +53,6 @@ impl<'a> Manifest<'a> {
 
         Self {
             version: MANIFEST_VERSION,
-            backup,
             kind,
             destination,
             started_at,
@@ -95,7 +92,6 @@ mod tests {
     #[test]
     fn total_plaintext_is_sum_when_all_known() {
         let manifest = Manifest::new(
-            "docs",
             "file",
             "aliyun",
             "t0".into(),
@@ -111,7 +107,6 @@ mod tests {
     #[test]
     fn total_plaintext_is_none_when_any_unknown() {
         let manifest = Manifest::new(
-            "db",
             "mysql",
             "aliyun",
             "t0".into(),
@@ -127,7 +122,6 @@ mod tests {
     #[test]
     fn serializes_to_expected_shape() {
         let manifest = Manifest::new(
-            "docs",
             "file",
             "aliyun",
             "t0".into(),
@@ -138,8 +132,9 @@ mod tests {
             0,
         );
         let json = serde_json::to_value(&manifest).unwrap();
-        assert_eq!(json["version"], 1);
+        assert_eq!(json["version"], 2);
         assert_eq!(json["encryption"], "age-passphrase");
         assert!(json["objects"].is_array());
+        assert!(json.get("backup").is_none());
     }
 }

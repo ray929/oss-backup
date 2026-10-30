@@ -42,21 +42,40 @@ prefix = "backups"
 access_key_id = "LTAI5t..."
 access_key_secret = "your-secret"
 
+[[destination]]
+name = "pg-archive"
+endpoint = "oss-cn-hangzhou.aliyuncs.com"
+bucket = "my-pg-archive"
+prefix = "backups"
+access_key_id = "LTAI5t..."
+access_key_secret = "your-secret"
+
+[[destination]]
+name = "sqlite-archive"
+endpoint = "oss-cn-hangzhou.aliyuncs.com"
+bucket = "my-sqlite-archive"
+prefix = "backups"
+access_key_id = "LTAI5t..."
+access_key_secret = "your-secret"
+
 # ---- 文件备份 ----
+# 每个 [[backup.file]] 是一个源路径，exclude 只作用于该路径
 [[backup]]
-name = "docs"
 destination = "aliyun"
 retain_count = 3
 
-[backup.file]
-local_path = ["D:/Documents", "D:/Photos"]
+[[backup.file]]
+local_path = "D:/Documents"
 # 空格分隔的 glob；目录名规则（如 node_modules）会同时排除其下所有内容
 exclude = ["node_modules target *.tmp Thumbs.db"]
 
+[[backup.file]]
+local_path = "D:/Photos"
+exclude = ["*.raw"]
+
 # ---- MySQL ----
 [[backup]]
-name = "blog-db"
-destination = "aliyun"
+destination = "archive"
 
 [backup.mysql]
 host = "127.0.0.1"
@@ -69,8 +88,7 @@ database = ["blog.*", "shop"]
 
 # ---- PostgreSQL ----
 [[backup]]
-name = "sales-db"
-destination = "archive"
+destination = "pg-archive"
 
 [backup.pgsql]
 host = "127.0.0.1"
@@ -80,14 +98,6 @@ password = "db-password"
 database = ["sales.*", "inventory.products"]
 
 # ---- SQLite ----
-# 一个 [[backup]] 可同时包含多种类型，共享一次运行目录与 manifest
 [[backup]]
-name = "app"
-destination = "aliyun"
-
-[backup.file]
-local_path = "D:/app/data"
-exclude = ["cache/*.tmp"]
-
-[backup.sqlite]
-database = ["D:/data/app.db", "D:/data/cache.db"]
+destination = "sqlite-archive"
+sqlite = ["D:/data/app.db", "D:/data/cache.db"]

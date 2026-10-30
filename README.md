@@ -6,12 +6,12 @@
 
 ## 特性
 
-- 四类备份：文件目录、MySQL、PostgreSQL、SQLite（热备）
-- 一个 `[[backup]]` 可同时包含多种类型（如文件 + SQLite），共享一次运行目录与 manifest
-- 文件类：`walkdir` → glob 排除 → `tar` → `zstd` → `age` → OSS，边压边传
+- 四类备份：文件目录、MySQL、PostgreSQL、SQLite（热备），一个 `[[backup]]` 可组合多种类型
+- `[[backup]]` 没有独立名称：运行目录按 destination 分段，一个 destination 对应一个备份项
+- 文件类：`walkdir` → glob 排除（每个 `[[backup.file]]` 自带 exclude）→ `tar` → `zstd` → `age` → OSS，边压边传
 - 数据库类：`mysqldump` / `pg_dump` / `sqlite3 .backup` 输出直接管道压缩加密，不套 tar
 - 层叠配置：`global` → `destination` → `backup`
-- 全量快照，按 backup 名隔离，应用端保留最近 N 份
+- 全量快照，按 destination 隔离，应用端保留最近 N 份
 - 上传完成后写 `manifest.json`（含 SHA-256、字节数、条目数），作为“本次运行完整”的提交标记
 - 失败即 `abort()` 放弃分片上传，OSS 上不会留下可见半成品对象
 - 进程级锁防重叠；可选 webhook 告警；明确退出码
@@ -61,7 +61,7 @@ oss-backup --config config.toml --background # 日志写入 oss-backup.log
 ## 对象布局
 
 ```
-{prefix}/{backup.name}/{YYYYMMDD_HHMMSS}/
+{prefix}/{destination}/{YYYYMMDD_HHMMSS}/
 ├── files.tar.zst.age             # 文件类
 ├── {database}.mysql.zst.age      # MySQL，每个库一个对象
 ├── {database}.pgsql.zst.age      # PostgreSQL
@@ -69,6 +69,7 @@ oss-backup --config config.toml --background # 日志写入 oss-backup.log
 └── manifest.json                 # 最后写入
 ```
 
+- 运行目录以 destination 名为段：同一个 destination 只能配置一个 `[[backup]]`
 - SQLite 用完整路径编码：`D:\data\app.db` → `D__data_app.sqlite.zst.age`；路径过长时改用路径哈希
 - 没有 `manifest.json` 的运行目录视为未完成，不参与保留计数；超过 24 小时会被回收
 
