@@ -100,8 +100,8 @@ impl Config {
                 backup.sqlite.is_some(),
             ];
             let count = kinds.iter().filter(|v| **v).count();
-            if count != 1 {
-                bail!("backup[{idx}] 必须且只能包含 file / mysql / pgsql / sqlite 之一");
+            if count == 0 {
+                bail!("backup[{idx}] 必须包含 file / mysql / pgsql / sqlite 至少一种");
             }
 
             if let Some(file) = &backup.file {
@@ -326,11 +326,18 @@ local_path = "D:/docs"
     }
 
     #[test]
-    fn rejects_two_payloads() {
+    fn allows_multiple_payloads() {
         let mut cfg = minimal();
         cfg.backup[0].sqlite = Some(SqliteCfg {
             database: vec![PathBuf::from("a.db")],
         });
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn rejects_no_payload() {
+        let mut cfg = minimal();
+        cfg.backup[0].file = None;
         assert!(cfg.validate().is_err());
     }
 

@@ -80,9 +80,14 @@ password = "db-password"
 database = ["sales.*", "inventory.products"]
 
 # ---- SQLite ----
+# 一个 [[backup]] 可同时包含多种类型，共享一次运行目录与 manifest
 [[backup]]
-name = "sqlite"
+name = "app"
 destination = "aliyun"
+
+[backup.file]
+local_path = "D:/app/data"
+exclude = ["cache/*.tmp"]
 
 [backup.sqlite]
 database = ["D:/data/app.db", "D:/data/cache.db"]

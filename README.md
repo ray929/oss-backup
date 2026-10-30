@@ -7,6 +7,7 @@
 ## 特性
 
 - 四类备份：文件目录、MySQL、PostgreSQL、SQLite（热备）
+- 一个 `[[backup]]` 可同时包含多种类型（如文件 + SQLite），共享一次运行目录与 manifest
 - 文件类：`walkdir` → glob 排除 → `tar` → `zstd` → `age` → OSS，边压边传
 - 数据库类：`mysqldump` / `pg_dump` / `sqlite3 .backup` 输出直接管道压缩加密，不套 tar
 - 层叠配置：`global` → `destination` → `backup`

@@ -54,26 +54,33 @@ pub async fn run_backup(cfg: &Config, backup: &Backup, dry_run: bool) -> Result<
         });
     }
 
-    let objects = if let Some(file) = &backup.file {
-        run_file(&store, backup, file, &settings, &run_dir).await?
-    } else if let Some(mysql) = &backup.mysql {
+    let mut objects = Vec::new();
+    if let Some(file) = &backup.file {
+        objects.extend(run_file(&store, backup, file, &settings, &run_dir).await?);
+    }
+    if let Some(mysql) = &backup.mysql {
         let dump_path = cfg.mysqldump_path().to_string();
-        run_mysql(&store, backup, mysql, &settings, &run_dir, &dump_path).await?
-    } else if let Some(pgsql) = &backup.pgsql {
+        objects.extend(run_mysql(&store, backup, mysql, &settings, &run_dir, &dump_path).await?);
+    }
+    if let Some(pgsql) = &backup.pgsql {
         let dump_path = cfg.pg_dump_path().to_string();
-        run_pgsql(&store, backup, pgsql, &settings, &run_dir, &dump_path).await?
-    } else if let Some(sqlite) = &backup.sqlite {
+        objects.extend(run_pgsql(&store, backup, pgsql, &settings, &run_dir, &dump_path).await?);
+    }
+    if let Some(sqlite) = &backup.sqlite {
         let sqlite3_path = cfg.sqlite3_path().to_string();
-        run_sqlite(&store, backup, sqlite, &settings, &run_dir, &sqlite3_path).await?
-    } else {
+        objects
+            .extend(run_sqlite(&store, backup, sqlite, &settings, &run_dir, &sqlite3_path).await?);
+    }
+    if objects.is_empty() {
         bail!("backup '{}' 没有可执行的备份类型", backup.name);
-    };
+    }
 
     let finished_at = Local::now();
     let total_bytes: u64 = objects.iter().map(|o| o.size).sum();
+    let kind = kinds_of(backup);
     let manifest = Manifest::new(
         &backup.name,
-        kind_of(backup),
+        &kind,
         &backup.destination,
         started_at.to_rfc3339(),
         finished_at.to_rfc3339(),
@@ -271,64 +278,69 @@ async fn run_sqlite(
     Ok(objects)
 }
 
-fn kind_of(backup: &Backup) -> &'static str {
+fn kinds_of(backup: &Backup) -> String {
+    let mut kinds = Vec::new();
     if backup.file.is_some() {
-        "file"
-    } else if backup.mysql.is_some() {
-        "mysql"
-    } else if backup.pgsql.is_some() {
-        "pgsql"
-    } else {
-        "sqlite"
+        kinds.push("file");
     }
+    if backup.mysql.is_some() {
+        kinds.push("mysql");
+    }
+    if backup.pgsql.is_some() {
+        kinds.push("pgsql");
+    }
+    if backup.sqlite.is_some() {
+        kinds.push("sqlite");
+    }
+    kinds.join("+")
 }
 
 fn inputs_of(backup: &Backup) -> Vec<String> {
+    let mut out = Vec::new();
     if let Some(file) = &backup.file {
-        let mut out: Vec<String> = file
-            .local_path
-            .iter()
-            .map(|p| p.display().to_string())
-            .collect();
+        out.extend(file.local_path.iter().map(|p| p.display().to_string()));
         out.extend(file.exclude.iter().map(|e| format!("exclude:{e}")));
-        out
-    } else if let Some(mysql) = &backup.mysql {
-        mysql.database.clone()
-    } else if let Some(pgsql) = &backup.pgsql {
-        pgsql.database.clone()
-    } else if let Some(sqlite) = &backup.sqlite {
-        sqlite
-            .database
-            .iter()
-            .map(|p| p.display().to_string())
-            .collect()
-    } else {
-        Vec::new()
     }
+    if let Some(mysql) = &backup.mysql {
+        out.extend(mysql.database.iter().cloned());
+    }
+    if let Some(pgsql) = &backup.pgsql {
+        out.extend(pgsql.database.iter().cloned());
+    }
+    if let Some(sqlite) = &backup.sqlite {
+        out.extend(sqlite.database.iter().map(|p| p.display().to_string()));
+    }
+    out
 }
 
 fn planned_objects(backup: &Backup) -> Vec<(String, Option<String>)> {
+    let mut out = Vec::new();
     if backup.file.is_some() {
-        vec![(naming::FILE_OBJECT.to_string(), None)]
-    } else if let Some(mysql) = &backup.mysql {
-        db::group_databases(&mysql.database)
-            .into_keys()
-            .map(|db| (naming::db_object_name(DbKind::Mysql, &db), Some(db)))
-            .collect()
-    } else if let Some(pgsql) = &backup.pgsql {
-        db::group_databases(&pgsql.database)
-            .into_keys()
-            .map(|db| (naming::db_object_name(DbKind::Pgsql, &db), Some(db)))
-            .collect()
-    } else if let Some(sqlite) = &backup.sqlite {
-        sqlite
-            .database
-            .iter()
-            .map(|p| (naming::sqlite_object_name(p), Some(p.display().to_string())))
-            .collect()
-    } else {
-        Vec::new()
+        out.push((naming::FILE_OBJECT.to_string(), None));
     }
+    if let Some(mysql) = &backup.mysql {
+        out.extend(
+            db::group_databases(&mysql.database)
+                .into_keys()
+                .map(|db| (naming::db_object_name(DbKind::Mysql, &db), Some(db))),
+        );
+    }
+    if let Some(pgsql) = &backup.pgsql {
+        out.extend(
+            db::group_databases(&pgsql.database)
+                .into_keys()
+                .map(|db| (naming::db_object_name(DbKind::Pgsql, &db), Some(db))),
+        );
+    }
+    if let Some(sqlite) = &backup.sqlite {
+        out.extend(
+            sqlite
+                .database
+                .iter()
+                .map(|p| (naming::sqlite_object_name(p), Some(p.display().to_string()))),
+        );
+    }
+    out
 }
 
 fn estimate_file(file: &crate::config::FileCfg) -> Result<(u64, u64)> {
@@ -434,7 +446,7 @@ mod tests {
             sqlite: None,
         };
         cfg.backup.push(backup);
-        assert_eq!(kind_of(&cfg.backup[0]), "file");
+        assert_eq!(kinds_of(&cfg.backup[0]), "file");
         assert_eq!(planned_objects(&cfg.backup[0]).len(), 1);
     }
 }
