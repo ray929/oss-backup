@@ -22,10 +22,10 @@ pub async fn run_backup(cfg: &Config, backup: &Backup, dry_run: bool) -> Result<
     let store = OssStore::new(destination, Duration::from_secs(settings.timeout_secs))?;
 
     let prefix = destination.prefix.as_deref();
-    let run_prefix = naming::run_prefix(prefix, &destination.name);
+    let run_prefix = naming::run_prefix(prefix);
     let started_at = Local::now();
     let timestamp = started_at.format(naming::TIMESTAMP_FORMAT).to_string();
-    let run_dir = naming::run_dir(prefix, &destination.name, &timestamp);
+    let run_dir = naming::run_dir(prefix, &timestamp);
     let part_size = settings.part_size_mb as usize * 1024 * 1024;
 
     if dry_run {
@@ -40,8 +40,8 @@ pub async fn run_backup(cfg: &Config, backup: &Backup, dry_run: bool) -> Result<
                 "计划写入"
             );
         }
-        if !backup.file.is_empty() {
-            let (count, bytes) = estimate_file(&backup.file)?;
+        if !backup.files.is_empty() {
+            let (count, bytes) = estimate_file(&backup.files)?;
             let parts = bytes as usize / part_size + 1;
             if parts > 10000 {
                 bail!("预估约 {parts} 个分片，超过 OSS 的 10000 片上限，请调大 part_size_mb");
@@ -55,8 +55,8 @@ pub async fn run_backup(cfg: &Config, backup: &Backup, dry_run: bool) -> Result<
     }
 
     let mut objects = Vec::new();
-    if !backup.file.is_empty() {
-        objects.extend(run_file(&store, &backup.file, &settings, &run_dir).await?);
+    if !backup.files.is_empty() {
+        objects.extend(run_file(&store, &backup.files, &settings, &run_dir).await?);
     }
     if let Some(mysql) = &backup.mysql {
         let dump_path = cfg.mysqldump_path().to_string();
@@ -281,7 +281,7 @@ async fn run_sqlite(
 
 fn kinds_of(backup: &Backup) -> String {
     let mut kinds = Vec::new();
-    if !backup.file.is_empty() {
+    if !backup.files.is_empty() {
         kinds.push("file");
     }
     if backup.mysql.is_some() {
@@ -298,7 +298,7 @@ fn kinds_of(backup: &Backup) -> String {
 
 fn inputs_of(backup: &Backup) -> Vec<String> {
     let mut out = Vec::new();
-    for spec in &backup.file {
+    for spec in &backup.files {
         out.push(spec.local_path.display().to_string());
         for pattern in &spec.exclude {
             out.push(format!("exclude:{}:{pattern}", spec.local_path.display()));
@@ -316,7 +316,7 @@ fn inputs_of(backup: &Backup) -> Vec<String> {
 
 fn planned_objects(backup: &Backup) -> Vec<(String, Option<String>)> {
     let mut out = Vec::new();
-    if !backup.file.is_empty() {
+    if !backup.files.is_empty() {
         out.push((naming::FILE_OBJECT.to_string(), None));
     }
     if let Some(mysql) = &backup.mysql {
@@ -412,7 +412,7 @@ mod tests {
             timeout_secs: None,
             age_passphrase: None,
             age_passphrase_file: None,
-            file: vec![],
+            files: vec![],
             mysql: None,
             pgsql: None,
             sqlite: vec![PathBuf::from(r"D:\a\app.db"), PathBuf::from(r"D:\b\app.db")],
@@ -433,7 +433,7 @@ mod tests {
             timeout_secs: None,
             age_passphrase: None,
             age_passphrase_file: None,
-            file: vec![FileCfg {
+            files: vec![FileCfg {
                 local_path: PathBuf::from(r"D:\docs"),
                 exclude: vec!["*.tmp".into()],
             }],
@@ -456,7 +456,7 @@ mod tests {
             timeout_secs: None,
             age_passphrase: None,
             age_passphrase_file: None,
-            file: vec![FileCfg {
+            files: vec![FileCfg {
                 local_path: PathBuf::from(r"D:\docs"),
                 exclude: vec!["*.tmp".into()],
             }],

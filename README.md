@@ -6,12 +6,12 @@
 
 ## 特性
 
-- 四类备份：文件目录、MySQL、PostgreSQL、SQLite（热备），一个 `[[backup]]` 可组合多种类型
-- `[[backup]]` 没有独立名称：运行目录按 destination 分段，一个 destination 对应一个备份项
-- 文件类：`walkdir` → glob 排除（每个 `[[backup.file]]` 自带 exclude）→ `tar` → `zstd` → `age` → OSS，边压边传
+- 四类备份：文件目录、MySQL、PostgreSQL、SQLite（热备），一个 `backup` 项可组合多种类型
+- 配置为 JSONC（允许 `//` 注释与尾逗号）；`destination` 与 `backup` 是平级数组，每个 `backup` 只引用一个 `destination`
+- 文件类：`walkdir` → glob 排除（每个 `files` 项自带 exclude）→ `tar` → `zstd` → `age` → OSS，边压边传
 - 数据库类：`mysqldump` / `pg_dump` / `sqlite3 .backup` 输出直接管道压缩加密，不套 tar
 - 层叠配置：`global` → `destination` → `backup`
-- 全量快照，按 destination 隔离，应用端保留最近 N 份
+- 全量快照，按运行目录保留最近 N 份
 - 上传完成后写 `manifest.json`（含 SHA-256、字节数、条目数），作为“本次运行完整”的提交标记
 - 失败即 `abort()` 放弃分片上传，OSS 上不会留下可见半成品对象
 - 进程级锁防重叠；可选 webhook 告警；明确退出码
@@ -37,16 +37,16 @@ cargo build --release
 ## 使用
 
 ```bash
-cp config.example.toml config.toml
-# 编辑 config.toml，填入 endpoint / bucket / AK/SK / age 口令
+cp config.example.json config.json
+# 编辑 config.json，填入 endpoint / bucket / AK/SK / age 口令
 
 # 收紧权限（含 AK/SK 与口令）
-chmod 600 config.toml                                     # Linux
-# icacls "config.toml" /inheritance:r /grant:r "%USERNAME%":F   # Windows
+chmod 600 config.json                                     # Linux
+# icacls "config.json" /inheritance:r /grant:r "%USERNAME%":F   # Windows
 
-oss-backup --config config.toml --dry-run    # 只校验配置与连通性，打印计划写入的 key
-oss-backup --config config.toml              # 执行备份
-oss-backup --config config.toml --background # 日志写入 oss-backup.log
+oss-backup --config config.json --dry-run    # 只校验配置与连通性，打印计划写入的 key
+oss-backup --config config.json              # 执行备份
+oss-backup --config config.json --background # 日志写入 oss-backup.log
 ```
 
 ### 退出码
@@ -61,7 +61,7 @@ oss-backup --config config.toml --background # 日志写入 oss-backup.log
 ## 对象布局
 
 ```
-{prefix}/{destination}/{YYYYMMDD_HHMMSS}/
+{prefix}/{YYYYMMDD_HHMMSS}/
 ├── files.tar.zst.age             # 文件类
 ├── {database}.mysql.zst.age      # MySQL，每个库一个对象
 ├── {database}.pgsql.zst.age      # PostgreSQL
@@ -69,7 +69,7 @@ oss-backup --config config.toml --background # 日志写入 oss-backup.log
 └── manifest.json                 # 最后写入
 ```
 
-- 运行目录以 destination 名为段：同一个 destination 只能配置一个 `[[backup]]`
+- 运行目录只按 `prefix` 分段，`destination` 与 `backup` 是平级配置项
 - SQLite 用完整路径编码：`D:\data\app.db` → `D__data_app.sqlite.zst.age`；路径过长时改用路径哈希
 - 没有 `manifest.json` 的运行目录视为未完成，不参与保留计数；超过 24 小时会被回收
 
@@ -100,11 +100,11 @@ age --decrypt -o blog.sql.zst blog.mysql.zst.age
 zstd -d blog.sql.zst                                # 得到 blog.sql，直接导入对应数据库
 ```
 
-前提是 `config.toml` 里配置的 age 口令（或其口令文件）仍在手。
+前提是 `config.json` 里配置的 age 口令（或其口令文件）仍在手。
 
 ## 安全说明
 
-- `config.toml` 是唯一密钥载体（AK/SK + age 口令 + 数据库口令），必须 600 / 仅本人可读
+- `config.json` 是唯一密钥载体（AK/SK + age 口令 + 数据库口令），必须 600 / 仅本人可读
 - 建议为备份单独创建 RAM 子账号，权限收敛到目标 bucket 的 `PutObject` / `AbortMultipartUpload` / `ListObjects` / `DeleteObject`
 - 日志与报错中的 AK/SK 会打码
 - Linux 下权限不合规直接拒绝启动；Windows 下检查 ACL 并给出 `icacls` 收紧命令

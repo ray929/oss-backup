@@ -1,4 +1,4 @@
-use serde::{Deserialize, Deserializer};
+use serde::Deserialize;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -50,19 +50,19 @@ pub struct Backup {
     pub age_passphrase: Option<String>,
     pub age_passphrase_file: Option<PathBuf>,
     /// 文件源列表，每个源带自己的排除规则
-    #[serde(default, deserialize_with = "one_or_many")]
-    pub file: Vec<FileCfg>,
+    #[serde(default)]
+    pub files: Vec<FileCfg>,
     pub mysql: Option<MysqlCfg>,
     pub pgsql: Option<PgsqlCfg>,
     /// SQLite 数据库文件列表
-    #[serde(default, deserialize_with = "one_or_many")]
+    #[serde(default)]
     pub sqlite: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct FileCfg {
     pub local_path: PathBuf,
-    #[serde(default, deserialize_with = "one_or_many")]
+    #[serde(default)]
     pub exclude: Vec<String>,
 }
 
@@ -73,7 +73,6 @@ pub struct MysqlCfg {
     pub port: u16,
     pub username: String,
     pub password: String,
-    #[serde(deserialize_with = "one_or_many")]
     pub database: Vec<String>,
     pub ssl_mode: Option<String>,
 }
@@ -85,7 +84,6 @@ pub struct PgsqlCfg {
     pub port: u16,
     pub username: String,
     pub password: String,
-    #[serde(deserialize_with = "one_or_many")]
     pub database: Vec<String>,
     pub ssl_mode: Option<String>,
 }
@@ -96,23 +94,4 @@ fn default_mysql_port() -> u16 {
 
 fn default_pgsql_port() -> u16 {
     5432
-}
-
-/// 允许配置写单个值或数组，统一解析为 `Vec<T>`。
-fn one_or_many<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
-where
-    D: Deserializer<'de>,
-    T: Deserialize<'de>,
-{
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum OneOrMany<T> {
-        One(T),
-        Many(Vec<T>),
-    }
-
-    Ok(match OneOrMany::<T>::deserialize(deserializer)? {
-        OneOrMany::One(v) => vec![v],
-        OneOrMany::Many(v) => v,
-    })
 }

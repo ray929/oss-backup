@@ -1,5 +1,5 @@
 /target
-/config.toml
+/config.json
 /testdata/
 /oss-backup.log
 /.oss-backup.lock

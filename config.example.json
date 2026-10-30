@@ -1,0 +1,83 @@
+{
+  // oss-backup 配置示例（JSONC，允许注释与尾逗号）
+  //
+  // 复制为 config.json 后修改，并收紧权限：
+  //   Linux:   chmod 600 config.json
+  //   Windows: icacls "config.json" /inheritance:r /grant:r "%USERNAME%":F
+  // 该文件包含 AK/SK 与 age 口令，切勿提交到仓库（.gitignore 已包含 config.json）。
+
+  "global": {
+    "log_level": "info",            // trace|debug|info|warn|error
+    "retain_count": 5,              // 每个运行目录保留最近 N 份，0 = 永不删除
+    "zstd_level": 3,                // -7..22，默认 3
+    "part_size_mb": 16,             // OSS 分片大小，默认 16
+    "timeout_secs": 1800,           // 单对象上传超时（秒）
+
+    // age 口令：二选一，文件优先
+    "age_passphrase_file": "D:/secrets/age-passphrase.txt",
+    // "age_passphrase": "your-passphrase",   // 明文，启动时会告警，不推荐
+
+    "webhook_url": "",              // 留空则不推送
+
+    // 可选：外部命令路径，留空则使用 PATH 中的同名命令
+    // "mysqldump_path": "C:/mysql/bin/mysqldump.exe",
+    // "pg_dump_path": "C:/postgres/bin/pg_dump.exe",
+    // "sqlite3_path": "C:/sqlite/sqlite3.exe"
+  },
+
+  // destination 与 backup 是平级数组；每个 backup 只引用一个 destination
+  "destination": [
+    {
+      "name": "aliyun",
+      "endpoint": "oss-cn-hangzhou.aliyuncs.com",
+      // 需要走内网时直接把域名换成：oss-cn-hangzhou-internal.aliyuncs.com
+      "bucket": "my-backup",
+      "prefix": "backups",
+      "access_key_id": "LTAI5t...",
+      "access_key_secret": "your-secret",
+      "retain_count": 5,            // 覆盖 global
+      "zstd_level": 3
+    }
+  ],
+
+  "backup": [
+    {
+      "destination": "aliyun",
+      "retain_count": 3,
+
+      // 每个 files 项是一个源路径，exclude 只作用于该路径
+      "files": [
+        {
+          "local_path": "D:/Documents",
+          // 空格分隔的 glob；目录名规则（如 node_modules）会同时排除其下所有内容
+          "exclude": ["node_modules target *.tmp Thumbs.db"]
+        },
+        {
+          "local_path": "D:/Photos",
+          "exclude": ["*.raw"]
+        }
+      ],
+
+      // SQLite 热备：直接列数据库文件
+      "sqlite": ["D:/data/app.db", "D:/data/cache.db"]
+
+      // MySQL：database 里 "db.*" 或 "db" 表示整库，"db.table" 表示只导出指定表
+      // "mysql": {
+      //   "host": "127.0.0.1",
+      //   "port": 3306,
+      //   "username": "backup",
+      //   "password": "db-password",
+      //   "database": ["blog.*", "shop"]
+      // },
+
+      // PostgreSQL
+      // "pgsql": {
+      //   "host": "127.0.0.1",
+      //   "port": 5432,
+      //   "username": "postgres",
+      //   "password": "db-password",
+      //   "database": ["sales.*", "inventory.products"]
+      // }
+    }
+  ]
+}

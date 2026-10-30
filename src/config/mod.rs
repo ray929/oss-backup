@@ -26,21 +26,24 @@ impl Config {
         let path = path.as_ref();
         if !path.exists() {
             bail!(
-                "配置文件不存在：{}\n请参考 config.example.toml 创建",
+                "配置文件不存在：{}\n请参考 config.example.json 创建",
                 path.display()
             );
         }
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("读取配置文件失败：{}", path.display()))?;
-        toml::from_str(&text).with_context(|| format!("解析配置文件失败：{}", path.display()))
+        let value = jsonc_parser::parse_to_serde_value(&text, &Default::default())
+            .with_context(|| format!("解析配置文件失败：{}", path.display()))?;
+        serde_json::from_value(value)
+            .with_context(|| format!("配置文件字段不合法：{}", path.display()))
     }
 
     pub fn validate(&self) -> Result<()> {
         if self.destination.is_empty() {
-            bail!("配置缺少 [[destination]]");
+            bail!("配置缺少 destination");
         }
         if self.backup.is_empty() {
-            bail!("配置缺少 [[backup]]");
+            bail!("配置缺少 backup");
         }
 
         let mut dest_names = HashSet::new();
@@ -71,7 +74,6 @@ impl Config {
             }
         }
 
-        let mut backup_destinations = HashSet::new();
         for (idx, backup) in self.backup.iter().enumerate() {
             if !self
                 .destination
@@ -83,27 +85,21 @@ impl Config {
                     backup.destination
                 );
             }
-            if !backup_destinations.insert(backup.destination.as_str()) {
-                bail!(
-                    "destination '{}' 被多个 [[backup]] 引用；运行目录按 destination 分段，一个 destination 只能对应一个 [[backup]]",
-                    backup.destination
-                );
-            }
 
             let kinds = [
-                !backup.file.is_empty(),
+                !backup.files.is_empty(),
                 backup.mysql.is_some(),
                 backup.pgsql.is_some(),
                 !backup.sqlite.is_empty(),
             ];
             let count = kinds.iter().filter(|v| **v).count();
             if count == 0 {
-                bail!("backup[{idx}] 必须包含 file / mysql / pgsql / sqlite 至少一种");
+                bail!("backup[{idx}] 必须包含 files / mysql / pgsql / sqlite 至少一种");
             }
 
-            for (spec_idx, file) in backup.file.iter().enumerate() {
+            for (spec_idx, file) in backup.files.iter().enumerate() {
                 if file.local_path.as_os_str().is_empty() {
-                    bail!("backup[{idx}].file[{spec_idx}].local_path 不能为空");
+                    bail!("backup[{idx}].files[{spec_idx}].local_path 不能为空");
                 }
             }
             if let Some(mysql) = &backup.mysql {
@@ -266,64 +262,68 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    fn parse(text: &str) -> Config {
+        let value = jsonc_parser::parse_to_serde_value(text, &Default::default()).unwrap();
+        serde_json::from_value(value).expect("config should parse")
+    }
+
     fn minimal() -> Config {
-        let text = r#"
-[global]
-age_passphrase = "pw"
-
-[[destination]]
-name = "aliyun"
-endpoint = "oss-cn-hangzhou.aliyuncs.com"
-bucket = "b"
-access_key_id = "id"
-access_key_secret = "sec"
-
-[[backup]]
-destination = "aliyun"
-
-[[backup.file]]
-local_path = "D:/docs"
-exclude = ["node_modules", "*.tmp"]
-"#;
-        toml::from_str(text).expect("config should parse")
+        parse(
+            r#"{
+  // JSONC 允许注释
+  "global": { "age_passphrase": "pw" },
+  "destination": [
+    {
+      "name": "aliyun",
+      "endpoint": "oss-cn-hangzhou.aliyuncs.com",
+      "bucket": "b",
+      "access_key_id": "id",
+      "access_key_secret": "sec"
+    }
+  ],
+  "backup": [
+    {
+      "destination": "aliyun",
+      "files": [
+        { "local_path": "D:/docs", "exclude": ["node_modules", "*.tmp"] }
+      ]
+    }
+  ]
+}"#,
+        )
     }
 
     #[test]
     fn parses_file_sources_with_own_excludes() {
         let cfg = minimal();
-        assert_eq!(cfg.backup[0].file.len(), 1);
-        assert_eq!(cfg.backup[0].file[0].local_path, PathBuf::from("D:/docs"));
-        assert_eq!(cfg.backup[0].file[0].exclude.len(), 2);
+        assert_eq!(cfg.backup[0].files.len(), 1);
+        assert_eq!(cfg.backup[0].files[0].local_path, PathBuf::from("D:/docs"));
+        assert_eq!(cfg.backup[0].files[0].exclude.len(), 2);
     }
 
     #[test]
-    fn parses_multiple_file_sources() {
-        let cfg: Config = toml::from_str(
-            r#"
-[global]
-age_passphrase = "pw"
-
-[[destination]]
-name = "aliyun"
-endpoint = "e"
-bucket = "b"
-access_key_id = "id"
-access_key_secret = "sec"
-
-[[backup]]
-destination = "aliyun"
-
-[[backup.file]]
-local_path = "D:/a"
-exclude = ["*.tmp"]
-
-[[backup.file]]
-local_path = "D:/b"
-"#,
-        )
-        .unwrap();
-        assert_eq!(cfg.backup[0].file.len(), 2);
-        assert!(cfg.backup[0].file[1].exclude.is_empty());
+    fn parses_multiple_file_sources_and_trailing_comma() {
+        let cfg = parse(
+            r#"{
+  "global": { "age_passphrase": "pw" },
+  "destination": [
+    { "name": "aliyun", "endpoint": "e", "bucket": "b", "access_key_id": "id", "access_key_secret": "sec" },
+  ],
+  "backup": [
+    {
+      "destination": "aliyun",
+      "files": [
+        { "local_path": "D:/a", "exclude": ["*.tmp"] },
+        { "local_path": "D:/b" },
+      ],
+      "sqlite": ["D:/a.db"],
+    },
+  ],
+}"#,
+        );
+        assert_eq!(cfg.backup[0].files.len(), 2);
+        assert!(cfg.backup[0].files[1].exclude.is_empty());
+        assert_eq!(cfg.backup[0].sqlite, vec![PathBuf::from("D:/a.db")]);
     }
 
     #[test]
@@ -356,19 +356,19 @@ local_path = "D:/b"
     }
 
     #[test]
-    fn rejects_no_payload() {
+    fn allows_two_backups_on_same_destination() {
         let mut cfg = minimal();
-        cfg.backup[0].file.clear();
-        assert!(cfg.validate().is_err());
+        let mut second = cfg.backup[0].clone();
+        second.files.clear();
+        second.sqlite = vec![PathBuf::from("a.db")];
+        cfg.backup.push(second);
+        assert!(cfg.validate().is_ok());
     }
 
     #[test]
-    fn rejects_duplicate_destination() {
+    fn rejects_no_payload() {
         let mut cfg = minimal();
-        let mut second = cfg.backup[0].clone();
-        second.file.clear();
-        second.sqlite = vec![PathBuf::from("a.db")];
-        cfg.backup.push(second);
+        cfg.backup[0].files.clear();
         assert!(cfg.validate().is_err());
     }
 
