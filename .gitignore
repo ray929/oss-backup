@@ -1,0 +1,5 @@
+/target
+/config.toml
+/oss-backup.log
+/.oss-backup.lock
+*.log
