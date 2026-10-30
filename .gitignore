@@ -5,10 +5,16 @@
 /.oss-backup.lock
 *.log
 
-# 本地 vibecoding / agent 产物，不入版本库
-/docs/
-/AGENTS.md
+# 工具 / agent 私有目录（git.md [GIT-5]）
 /.trae/
-/.workerbuddy/
+/.vscode/
+/.codebuddy/
 /.workbuddy/
+/.workerbuddy/
 /.screenshots/
+/AGENTS.md
+/docs/
+
+# 调试脚本、截图、草稿、预览（prefs.md §8）
+/.temp/
+/.test/
