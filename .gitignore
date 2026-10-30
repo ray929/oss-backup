@@ -3,3 +3,10 @@
 /oss-backup.log
 /.oss-backup.lock
 *.log
+
+# 本地 vibecoding / agent 产物，不入版本库
+/docs/
+/AGENTS.md
+/.trae/
+/.workerbuddy/
+/.workbuddy/

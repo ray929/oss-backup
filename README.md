@@ -115,8 +115,6 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-设计文档见 [docs/design.md](docs/design.md)。
-
 ## 限制
 
 - 全量快照，不做增量与去重
