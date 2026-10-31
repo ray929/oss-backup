@@ -26,7 +26,7 @@ impl Config {
         let path = path.as_ref();
         if !path.exists() {
             bail!(
-                "配置文件不存在：{}\n请参考 config.example.json 创建",
+                "配置文件不存在：{}\n请参考 config.example.jsonc 创建",
                 path.display()
             );
         }

@@ -9,7 +9,7 @@ use std::path::PathBuf;
 )]
 pub struct Cli {
     /// 配置文件路径
-    #[arg(short, long, default_value = "config.json")]
+    #[arg(short, long, default_value = "config.jsonc")]
     pub config: PathBuf,
 
     /// 只校验配置与连通性，打印计划写入的对象，不实际上传

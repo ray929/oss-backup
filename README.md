@@ -48,15 +48,15 @@ Tagged builds (`v*`) are cross-compiled by CI for `x86_64-unknown-linux-musl` an
 ## Usage
 
 ```bash
-cp config.example.json config.json
-# edit config.json: endpoint, bucket, access keys, age passphrase
+cp config.example.jsonc config.jsonc
+# edit config.jsonc: endpoint, bucket, access keys, age passphrase
 
-chmod 600 config.json   # Linux: the file holds AK/SK and passphrases
-# icacls "config.json" /inheritance:r /grant:r "%USERNAME%":F   # Windows
+chmod 600 config.jsonc   # Linux: the file holds AK/SK and passphrases
+# icacls "config.jsonc" /inheritance:r /grant:r "%USERNAME%":F   # Windows
 
-oss-backup --config config.json --dry-run    # validate config and connectivity, print planned keys
-oss-backup --config config.json              # run the backup
-oss-backup --config config.json --background # also log to oss-backup.log next to the config file
+oss-backup --config config.jsonc --dry-run    # validate config and connectivity, print planned keys
+oss-backup --config config.jsonc              # run the backup
+oss-backup --config config.jsonc --background # also log to oss-backup.log next to the config file
 ```
 
 ### Exit Codes
@@ -115,11 +115,11 @@ age --decrypt -o blog.sql.zst blog.mysql.zst.age
 zstd -d blog.sql.zst                   # import blog.sql into the target database
 ```
 
-Both require the age passphrase configured in `config.json`.
+Both require the age passphrase configured in `config.jsonc`.
 
 ## Security
 
-- `config.json` is the only credential store. Keep it at `600` / owner-only: on Linux a looser mode aborts startup, on Windows the ACL is inspected and a tightening command is printed.
+- `config.jsonc` is the only credential store. Keep it at `600` / owner-only: on Linux a looser mode aborts startup, on Windows the ACL is inspected and a tightening command is printed.
 - Use a dedicated RAM user scoped to `PutObject`, `AbortMultipartUpload`, `ListObjects` and `DeleteObject` on the target bucket.
 - Access keys and passphrases are masked in logs and in `Debug` output (first 4 + last 4 characters).
 - Database passwords are passed to child processes through environment variables, never through the command line.

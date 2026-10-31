@@ -60,7 +60,7 @@ jobs:
           else
             cp target/${{ matrix.target }}/release/oss-backup dist/
           fi
-          cp README.md config.example.json dist/
+          cp README.md config.example.jsonc dist/
           cd dist && 7z a ../${{ matrix.archive }}.zip . 2>/dev/null || zip -r ../${{ matrix.archive }}.zip .
       - uses: softprops/action-gh-release@v2
         with:

@@ -1,5 +1,6 @@
 /target
 /config.json
+/config.jsonc
 /testdata/
 /oss-backup.log
 /.oss-backup.lock

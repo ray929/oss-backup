@@ -1,10 +1,10 @@
 {
   // oss-backup 配置示例（JSONC，允许注释与尾逗号）
   //
-  // 复制为 config.json 后修改，并收紧权限：
-  //   Linux:   chmod 600 config.json
-  //   Windows: icacls "config.json" /inheritance:r /grant:r "%USERNAME%":F
-  // 该文件包含 AK/SK 与 age 口令，切勿提交到仓库（.gitignore 已包含 config.json）。
+  // 复制为 config.jsonc 后修改，并收紧权限：
+  //   Linux:   chmod 600 config.jsonc
+  //   Windows: icacls "config.jsonc" /inheritance:r /grant:r "%USERNAME%":F
+  // 该文件包含 AK/SK 与 age 口令，切勿提交到仓库（.gitignore 已包含 config.jsonc）。
 
   "global": {
     "log_level": "info",            // trace|debug|info|warn|error
