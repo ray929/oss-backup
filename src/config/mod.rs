@@ -148,8 +148,11 @@ impl Config {
             .or(dest.zstd_level)
             .or(self.global.zstd_level)
             .unwrap_or(DEFAULT_ZSTD_LEVEL);
-        if !(-7..=22).contains(&zstd_level) {
-            bail!("zstd_level 必须在 -7..=22 之间，当前为 {zstd_level}");
+        // 上限卡在 9：zstd 16 级以上的压缩窗口能到数百 MB，会直接突破内存预算
+        if !(-7..=9).contains(&zstd_level) {
+            bail!(
+                "zstd_level 必须在 -7..=9 之间，当前为 {zstd_level}（更高层级的压缩窗口会突破内存预算）"
+            );
         }
 
         let part_size_mb = backup

@@ -10,7 +10,6 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
-thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
@@ -27,7 +26,6 @@ hex = "0.4"
 globset = "0.4"
 walkdir = "2"
 fs2 = "0.4"
-futures-util = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tempfile = "3"
 jsonc-parser = { version = "0.34.0", features = ["serde", "serde_json"] }

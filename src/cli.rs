@@ -2,7 +2,11 @@ use clap::Parser;
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
-#[command(name = "oss-backup", about = "把本地文件与数据库备份到阿里云 OSS")]
+#[command(
+    name = "oss-backup",
+    version,
+    about = "把本地文件与数据库备份到阿里云 OSS"
+)]
 pub struct Cli {
     /// 配置文件路径
     #[arg(short, long, default_value = "config.json")]

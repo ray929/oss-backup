@@ -9,7 +9,7 @@
   "global": {
     "log_level": "info",            // trace|debug|info|warn|error
     "retain_count": 5,              // 每个运行目录保留最近 N 份，0 = 永不删除
-    "zstd_level": 3,                // -7..22，默认 3
+    "zstd_level": 3,                // -7..9，默认 3（更高层级的压缩窗口会突破内存预算）
     "part_size_mb": 16,             // OSS 分片大小，默认 16
     "timeout_secs": 1800,           // 单对象上传超时（秒）
 

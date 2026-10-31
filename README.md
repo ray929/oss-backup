@@ -2,7 +2,7 @@
 
 Back up local directories and MySQL / PostgreSQL / SQLite databases to Alibaba Cloud OSS.
 
-Archives are compressed with `zstd`, encrypted with `age`, and uploaded as a single stream: no temp archive file, no reading whole files into memory. Memory usage is bounded by the multipart chunk size, not by the size of the backup.
+Archives are compressed with `zstd`, encrypted with `age`, and uploaded as a single stream: no temp archive file, no reading whole files into memory. Memory does not grow with the size of the backup — buffers are bounded by the multipart chunk size, plus a fixed ~64 MiB scrypt working set while an archive's key is derived.
 
 ## Features
 
@@ -97,6 +97,8 @@ OSS lifecycle rules are not used — they can express "keep N days" but not "kee
 Artifacts are encrypted with [age](https://age-encryption.org/) in passphrase mode (scrypt) and are compatible with the `age` and `rage` CLIs.
 
 The passphrase comes from `age_passphrase_file` when set, otherwise from the plaintext `age_passphrase` (a warning is logged at startup).
+
+The scrypt work factor is pinned at `log_n = 16` (about 64 MiB and a few hundred milliseconds) instead of age's runtime-tuned default, so peak memory stays predictable. The parameter is recorded in each file's header, so decryption is unaffected and existing archives remain readable.
 
 ## Manual Restore
 

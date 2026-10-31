@@ -29,6 +29,7 @@ pub async fn run_backup(cfg: &Config, backup: &Backup, dry_run: bool) -> Result<
     let part_size = settings.part_size_mb as usize * 1024 * 1024;
 
     if dry_run {
+        check_local_inputs(cfg, backup)?;
         store
             .probe(&run_prefix)
             .await
@@ -299,6 +300,41 @@ async fn run_sqlite(
     }
 
     Ok(objects)
+}
+
+/// dry-run 阶段就检查本地输入：SQLite 文件是否存在、导出命令是否可执行。
+/// 这些错了正式跑一样会失败，提前暴露比传到一半再报错好。
+fn check_local_inputs(cfg: &Config, backup: &Backup) -> Result<()> {
+    for db in &backup.sqlite {
+        if !db.exists() {
+            bail!("SQLite 数据库不存在：{}", db.display());
+        }
+    }
+    if backup.mysql.is_some() {
+        ensure_command(cfg.mysqldump_path())?;
+    }
+    if backup.pgsql.is_some() {
+        ensure_command(cfg.pg_dump_path())?;
+    }
+    if !backup.sqlite.is_empty() {
+        ensure_command(cfg.sqlite3_path())?;
+    }
+    Ok(())
+}
+
+/// 只跑 `--version` 验证可执行，不连接数据库
+fn ensure_command(program: &str) -> Result<()> {
+    let status = std::process::Command::new(program)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    match status {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => bail!("{program} 无法正常执行（--version 返回 {status}）"),
+        Err(err) => bail!("找不到可执行文件 {program}：{err}"),
+    }
 }
 
 /// OSS 单对象最多 10000 个分片；超限会在上传中途被拒绝
