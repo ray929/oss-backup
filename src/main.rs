@@ -12,6 +12,7 @@ mod retention;
 mod storage;
 
 use clap::Parser;
+use std::path::Path;
 use tracing::{error, info};
 
 #[tokio::main]
@@ -32,7 +33,13 @@ async fn run() -> i32 {
         }
     };
 
-    if let Err(err) = logger::init(cfg.global.log_level.as_deref(), args.background) {
+    // --background 的日志跟着配置文件走，不落在当前工作目录
+    let log_dir = args
+        .config
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    if let Err(err) = logger::init(cfg.global.log_level.as_deref(), args.background, log_dir) {
         eprintln!("初始化日志失败：{err:#}");
         return 2;
     }
@@ -70,7 +77,7 @@ async fn run() -> i32 {
             Err(err) => {
                 error!(destination = %backup.destination, "备份失败：{err:#}");
                 failures.push(notify::NotifyFailure {
-                    name: backup.destination.clone(),
+                    name: format!("{} [{}]", backup.destination, backup::kinds_of(backup)),
                     error: format!("{err:#}"),
                 });
             }

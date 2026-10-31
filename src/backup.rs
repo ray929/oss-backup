@@ -8,7 +8,7 @@ use crate::storage::{upload_stream, OssStore};
 use anyhow::{bail, Context, Result};
 use chrono::Local;
 use std::time::Duration;
-use tracing::info;
+use tracing::{info, warn};
 use walkdir::WalkDir;
 
 pub struct RunSummary {
@@ -42,10 +42,7 @@ pub async fn run_backup(cfg: &Config, backup: &Backup, dry_run: bool) -> Result<
         }
         if !backup.files.is_empty() {
             let (count, bytes) = estimate_file(&backup.files)?;
-            let parts = bytes as usize / part_size + 1;
-            if parts > 10000 {
-                bail!("预估约 {parts} 个分片，超过 OSS 的 10000 片上限，请调大 part_size_mb");
-            }
+            let parts = ensure_part_limit(bytes, part_size)?;
             info!(files = count, bytes, parts, "待备份文件预估");
         }
         return Ok(RunSummary {
@@ -54,17 +51,27 @@ pub async fn run_backup(cfg: &Config, backup: &Backup, dry_run: bool) -> Result<
         });
     }
 
+    // 正式路径同样先估算：分片超限要在这里拒绝，而不是等 OSS 传到一半才报错，
+    // 那时已上传的分片只能靠 abort 清理。
+    if !backup.files.is_empty() {
+        let (_, bytes) = estimate_file(&backup.files)?;
+        ensure_part_limit(bytes, part_size)?;
+    }
+
+    let dump_timeout = Duration::from_secs(settings.timeout_secs);
     let mut objects = Vec::new();
     if !backup.files.is_empty() {
         objects.extend(run_file(&store, &backup.files, &settings, &run_dir).await?);
     }
     if let Some(mysql) = &backup.mysql {
         let dump_path = cfg.mysqldump_path().to_string();
-        objects.extend(run_mysql(&store, backup, mysql, &settings, &run_dir, &dump_path).await?);
+        objects
+            .extend(run_mysql(&store, mysql, &settings, &run_dir, &dump_path, dump_timeout).await?);
     }
     if let Some(pgsql) = &backup.pgsql {
         let dump_path = cfg.pg_dump_path().to_string();
-        objects.extend(run_pgsql(&store, backup, pgsql, &settings, &run_dir, &dump_path).await?);
+        objects
+            .extend(run_pgsql(&store, pgsql, &settings, &run_dir, &dump_path, dump_timeout).await?);
     }
     if !backup.sqlite.is_empty() {
         let sqlite3_path = cfg.sqlite3_path().to_string();
@@ -102,8 +109,11 @@ pub async fn run_backup(cfg: &Config, backup: &Backup, dry_run: bool) -> Result<
         "对象上传完成，manifest 已写入"
     );
 
+    // 清理失败只影响存储占用，不该把已经成功的备份判成失败
     if settings.retain_count > 0 {
-        retention::apply(&store, &run_prefix, settings.retain_count).await?;
+        if let Err(err) = retention::apply(&store, &run_prefix, settings.retain_count).await {
+            warn!("清理旧备份失败（本次备份已成功）：{err:#}");
+        }
     }
 
     Ok(RunSummary {
@@ -150,11 +160,11 @@ async fn run_file(
 
 async fn run_mysql(
     store: &OssStore,
-    backup: &Backup,
     mysql: &MysqlCfg,
     settings: &BackupSettings,
     run_dir: &str,
     dump_path: &str,
+    timeout: Duration,
 ) -> Result<Vec<ManifestObject>> {
     let grouped = db::group_databases(&mysql.database);
     let mut objects = Vec::new();
@@ -179,6 +189,7 @@ async fn run_mysql(
                 level,
                 &passphrase,
                 &dump,
+                timeout,
             )
         })
         .await
@@ -195,33 +206,42 @@ async fn run_mysql(
         });
     }
 
-    let _ = backup;
     Ok(objects)
 }
 
 async fn run_pgsql(
     store: &OssStore,
-    backup: &Backup,
     pgsql: &PgsqlCfg,
     settings: &BackupSettings,
     run_dir: &str,
     dump_path: &str,
+    timeout: Duration,
 ) -> Result<Vec<ManifestObject>> {
     let grouped = db::group_databases(&pgsql.database);
     let mut objects = Vec::new();
     let part_size = settings.part_size_mb as usize * 1024 * 1024;
 
-    for database in grouped.keys() {
-        let object = naming::db_object_name(DbKind::Pgsql, database);
+    for (database, tables) in grouped {
+        let object = naming::db_object_name(DbKind::Pgsql, &database);
         let key = format!("{run_dir}/{object}");
         let cfg = pgsql.clone();
+        let tables_owned = tables.clone();
         let db_name = database.clone();
         let dump = dump_path.to_string();
         let level = settings.zstd_level;
         let passphrase = settings.passphrase.clone();
 
         let stats = upload_stream(store.operator(), &key, part_size, move |sink| {
-            db::pgsql::produce(sink, &cfg, &db_name, level, &passphrase, &dump)
+            db::pgsql::produce(
+                sink,
+                &cfg,
+                &db_name,
+                &tables_owned,
+                level,
+                &passphrase,
+                &dump,
+                timeout,
+            )
         })
         .await
         .with_context(|| format!("备份 PgSQL 库 {database} 失败"))?;
@@ -229,7 +249,7 @@ async fn run_pgsql(
         info!(key = %key, bytes = stats.bytes, "已上传 PgSQL 导出");
         objects.push(ManifestObject {
             key,
-            source: Some(database.clone()),
+            source: Some(database),
             size: stats.bytes,
             sha256: stats.sha256,
             plaintext_bytes: stats.plaintext_bytes,
@@ -237,7 +257,6 @@ async fn run_pgsql(
         });
     }
 
-    let _ = backup;
     Ok(objects)
 }
 
@@ -279,7 +298,16 @@ async fn run_sqlite(
     Ok(objects)
 }
 
-fn kinds_of(backup: &Backup) -> String {
+/// OSS 单对象最多 10000 个分片；超限会在上传中途被拒绝
+fn ensure_part_limit(bytes: u64, part_size: usize) -> Result<u64> {
+    let parts = bytes / part_size as u64 + 1;
+    if parts > 10000 {
+        bail!("预估约 {parts} 个分片，超过 OSS 的 10000 片上限，请调大 part_size_mb");
+    }
+    Ok(parts)
+}
+
+pub fn kinds_of(backup: &Backup) -> String {
     let mut kinds = Vec::new();
     if !backup.files.is_empty() {
         kinds.push("file");

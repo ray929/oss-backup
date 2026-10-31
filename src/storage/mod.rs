@@ -82,10 +82,14 @@ where
         }
     };
 
-    writer
-        .close()
-        .await
-        .with_context(|| format!("完成上传失败：{key}"))?;
+    // close 失败同样要 abort：否则分片留在 OSS 上不可见但持续计费，
+    // 与 README「失败即放弃分片上传」的承诺不符。
+    if let Err(err) = writer.close().await {
+        if let Err(abort_err) = writer.abort().await {
+            tracing::warn!("放弃分片上传失败（{key}）：{abort_err}");
+        }
+        return Err(anyhow!(err).context(format!("完成上传失败：{key}")));
+    }
 
     Ok(UploadStats {
         bytes,

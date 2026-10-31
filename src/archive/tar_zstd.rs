@@ -98,9 +98,24 @@ pub(crate) fn exclude_set(patterns: &[String]) -> Result<GlobSet> {
             if let Ok(subtree) = Glob::new(&format!("{piece}/**")) {
                 builder.add(subtree);
             }
+            // globset 是整串匹配、且不补任何隐式前缀：只写 "node_modules" 时，
+            // "a/node_modules" 与 "a/node_modules/x.js" 都不会命中。含通配符的规则
+            // （如 "*.tmp"）因为分隔符不被特殊处理，本来就能跨层级匹配，无需补。
+            if is_plain_name(piece) {
+                for nested in [format!("**/{piece}"), format!("**/{piece}/**")] {
+                    if let Ok(glob) = Glob::new(&nested) {
+                        builder.add(glob);
+                    }
+                }
+            }
         }
     }
     builder.build().context("构建排除规则失败")
+}
+
+/// 纯名字规则：不含路径分隔符，也不含任何通配符
+fn is_plain_name(piece: &str) -> bool {
+    !piece.contains(['/', '\\']) && !piece.chars().any(|c| "*?[]{}".contains(c))
 }
 
 #[cfg(test)]
@@ -250,5 +265,21 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("非法排除规则"));
+    }
+
+    #[test]
+    fn excludes_nested_directories_by_name() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("a/node_modules/pkg")).unwrap();
+        std::fs::write(dir.path().join("a/keep.txt"), b"keep").unwrap();
+        std::fs::write(dir.path().join("a/node_modules/pkg/index.js"), b"js").unwrap();
+
+        // 纯名字规则必须覆盖任意层级的同名目录，而不只是备份根
+        let (stats, ciphertext) = produce_collect(&[source(dir.path(), &["node_modules"])]);
+        assert_eq!(stats.entries, 1);
+
+        let names = decrypt_and_list(&ciphertext);
+        assert_eq!(names.len(), 1);
+        assert!(names[0].ends_with("a/keep.txt"), "unexpected: {names:?}");
     }
 }

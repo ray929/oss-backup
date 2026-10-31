@@ -45,6 +45,13 @@ pub fn select_deletions(
     retain: usize,
     now: NaiveDateTime,
 ) -> Vec<String> {
+    // 0 = 永不删除。调用方目前也会提前返回，但契约写在这里更安全：
+    // 少一处判断就会把整个 prefix 清空。
+    if retain == 0 {
+        debug!("retain_count 为 0，不产生任何删除");
+        return Vec::new();
+    }
+
     let mut deletions = Vec::new();
 
     let mut complete: Vec<&String> = runs

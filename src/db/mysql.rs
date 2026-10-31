@@ -3,7 +3,9 @@ use crate::config::MysqlCfg;
 use crate::db::stream_command;
 use anyhow::Result;
 use std::process::Command;
+use std::time::Duration;
 
+#[allow(clippy::too_many_arguments)]
 pub fn produce(
     sink: ChunkSink,
     cfg: &MysqlCfg,
@@ -12,6 +14,7 @@ pub fn produce(
     level: i32,
     passphrase: &str,
     dump_path: &str,
+    timeout: Duration,
 ) -> Result<ProduceStats> {
     let mut cmd = Command::new(dump_path);
     cmd.arg(format!("--host={}", cfg.host))
@@ -35,5 +38,5 @@ pub fn produce(
         }
     }
 
-    stream_command(cmd, sink, level, passphrase)
+    stream_command(cmd, sink, level, passphrase, timeout)
 }

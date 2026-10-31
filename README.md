@@ -7,13 +7,18 @@
 ## 特性
 
 - 四类备份：文件目录、MySQL、PostgreSQL、SQLite（热备），一个 `backup` 项可组合多种类型
-- 配置为 JSONC（允许 `//` 注释与尾逗号）；`destination` 与 `backup` 是平级数组，每个 `backup` 只引用一个 `destination`
+- 配置为 JSONC（允许 `//` 注释与尾逗号）；`destination` 与 `backup` 是平级数组，每个 `backup` 引用一个 `destination`，**一个 `destination` 只能被一个 `backup` 引用**（保留计数与运行目录都按 `prefix` 划分，共用会互相删备份）
+- 配置键名严格校验：拼错的字段直接报错，不会被静默忽略
 - 文件类：`walkdir` → glob 排除（每个 `files` 项自带 exclude）→ `tar` → `zstd` → `age` → OSS，边压边传
+  - 目录名规则（如 `node_modules`、`target`）对**任意层级**生效，不只匹配备份根
+  - 含通配符的规则（如 `*.tmp`）同样跨层级匹配
 - 数据库类：`mysqldump` / `pg_dump` / `sqlite3 .backup` 输出直接管道压缩加密，不套 tar
+  - `db.table` 对 MySQL / PostgreSQL 都生效，只导出指定表；`db` 或 `db.*` 导出整库
+  - 导出命令受 `timeout_secs` 约束，超时会被终止并报错，不会无限挂住
 - 层叠配置：`global` → `destination` → `backup`
 - 全量快照，按运行目录保留最近 N 份
 - 上传完成后写 `manifest.json`（含 SHA-256、字节数、条目数），作为“本次运行完整”的提交标记
-- 失败即 `abort()` 放弃分片上传，OSS 上不会留下可见半成品对象
+- 失败即 `abort()` 放弃分片上传（含 `close` 失败），OSS 上不会留下可见半成品对象
 - 进程级锁防重叠；可选 webhook 告警；明确退出码
 
 ## 要求
@@ -46,7 +51,7 @@ chmod 600 config.json                                     # Linux
 
 oss-backup --config config.json --dry-run    # 只校验配置与连通性，打印计划写入的 key
 oss-backup --config config.json              # 执行备份
-oss-backup --config config.json --background # 日志写入 oss-backup.log
+oss-backup --config config.json --background # 日志写入配置文件同目录的 oss-backup.log
 ```
 
 ### 退出码
@@ -124,3 +129,10 @@ cargo test
 - 串行执行各 backup 项，单对象内分片也是串行上传
 - 数据库导出依赖外部命令，且数据库口令以明文写在配置文件中
 - 单次备份预期 < 50GB（默认 `part_size_mb = 16`，OSS 上限 10000 片）
+
+## 已知边界
+
+- **SQLite 热备会落一份临时快照**：`sqlite3 .backup` 只能写文件，因此每次备份都会在系统临时目录生成一份**未加密**的数据库副本（权限 0600）。进程正常退出时删除；被 `SIGKILL`、断电或任务超时强杀时会残留，需人工清理临时目录
+- **崩溃不会清理 OSS 分片**：`abort()` 只在可捕获的错误路径执行。进程被强杀或断电时，已上传的分片会留在 OSS 上（不可见但计费）。建议给 bucket 配置 `AbortIncompleteMultipartUpload` 生命周期规则兜底
+- **孤儿目录回收依赖 `retain_count > 0`**：某次运行失败后留下的无 `manifest.json` 目录，只在下次成功备份且 `retain_count` 不为 0 时按 24 小时规则回收；`retain_count = 0`（默认）时永不回收
+- **`--dry-run` 只验证列举权限**：确认的是 `ListObjects` 可用，不等于账号有 `PutObject` 权限

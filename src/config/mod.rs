@@ -74,6 +74,7 @@ impl Config {
             }
         }
 
+        let mut used_destinations: HashSet<&str> = HashSet::new();
         for (idx, backup) in self.backup.iter().enumerate() {
             if !self
                 .destination
@@ -82,6 +83,16 @@ impl Config {
             {
                 bail!(
                     "backup[{idx}] 引用了不存在的 destination '{}'",
+                    backup.destination
+                );
+            }
+
+            // 运行目录与保留计数都以 destination.prefix 为命名空间。一个 destination 被
+            // 多个 backup 项共用时，两项会按各自的 retain_count 删掉对方的备份；同一秒
+            // 启动时还会写进同一个运行目录，manifest 相互覆盖。因此强制一对一。
+            if !used_destinations.insert(backup.destination.as_str()) {
+                bail!(
+                    "backup[{idx}] 与前面的项重复引用 destination '{}'；每个 destination 只能出现一次",
                     backup.destination
                 );
             }
@@ -106,11 +117,13 @@ impl Config {
                 if mysql.database.is_empty() {
                     bail!("backup[{idx}].mysql.database 不能为空");
                 }
+                validate_db_entries("mysql", idx, &mysql.database)?;
             }
             if let Some(pgsql) = &backup.pgsql {
                 if pgsql.database.is_empty() {
                     bail!("backup[{idx}].pgsql.database 不能为空");
                 }
+                validate_db_entries("pgsql", idx, &pgsql.database)?;
             }
 
             self.settings(backup)
@@ -213,6 +226,16 @@ impl Config {
             _ => bail!("未配置 age 口令（age_passphrase_file 或 age_passphrase）"),
         }
     }
+}
+
+/// 校验 `db` / `db.*` / `db.table` 条目，拒绝空段（如 `blog.` 会被解析成空表名）
+fn validate_db_entries(kind: &str, idx: usize, entries: &[String]) -> Result<()> {
+    for entry in entries {
+        if entry.split('.').any(|part| part.trim().is_empty()) {
+            bail!("backup[{idx}].{kind}.database 条目 '{entry}' 含空段；整库请写 'db' 或 'db.*'");
+        }
+    }
+    Ok(())
 }
 
 /// 配置文件权限校验。
@@ -356,13 +379,42 @@ mod tests {
     }
 
     #[test]
-    fn allows_two_backups_on_same_destination() {
+    fn rejects_two_backups_on_same_destination() {
         let mut cfg = minimal();
         let mut second = cfg.backup[0].clone();
         second.files.clear();
         second.sqlite = vec![PathBuf::from("a.db")];
         cfg.backup.push(second);
-        assert!(cfg.validate().is_ok());
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("每个 destination 只能出现一次"), "{err}");
+    }
+
+    #[test]
+    fn rejects_unknown_fields() {
+        let text = r#"{
+  "global": { "age_passpharse": "typo" },
+  "destination": [],
+  "backup": []
+}"#;
+        let value = jsonc_parser::parse_to_serde_value(text, &Default::default()).unwrap();
+        assert!(
+            serde_json::from_value::<Config>(value).is_err(),
+            "拼错的键名必须报错，而不是被静默忽略"
+        );
+    }
+
+    #[test]
+    fn rejects_empty_table_segment() {
+        let mut cfg = minimal();
+        cfg.backup[0].mysql = Some(crate::config::MysqlCfg {
+            host: "127.0.0.1".into(),
+            port: 3306,
+            username: "u".into(),
+            password: "p".into(),
+            database: vec!["blog.".into()],
+            ssl_mode: None,
+        });
+        assert!(cfg.validate().is_err());
     }
 
     #[test]
