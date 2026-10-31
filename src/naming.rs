@@ -66,17 +66,23 @@ pub fn db_object_name(kind: DbKind, database: &str) -> String {
 }
 
 /// SQLite 用完整路径编码，避免不同目录同名文件冲突
+///
+/// 编码规则：先把 `_` 转义成 `__`，再把 `/` `\` `:` 替换成 `_`，原扩展名保留。
+/// 不能简单地把分隔符都换成 `_`——那样 `D:\a\app.db` 与 `D:\a_app.db` 会撞成
+/// 同一个对象名，后者会静默覆盖前者；去掉扩展名还会让 `app.db` 与 `app.sqlite3` 撞名。
 pub fn sqlite_object_name(path: &Path) -> String {
-    let base = path.with_extension("");
-    let encoded: String = base
-        .to_string_lossy()
-        .chars()
-        .map(|c| match c {
-            '/' | '\\' | ':' => '_',
-            other => other,
-        })
-        .collect();
-    let encoded = encoded.trim_start_matches('_').to_string();
+    let raw = path.to_string_lossy();
+    // 只去掉路径开头那几个分隔符。编码后再 trim 会把转义出来的 `__` 一起吃掉了。
+    let stripped = raw.trim_start_matches(['/', '\\']);
+
+    let mut encoded = String::with_capacity(stripped.len());
+    for c in stripped.chars() {
+        match c {
+            '_' => encoded.push_str("__"),
+            '/' | '\\' | ':' => encoded.push('_'),
+            other => encoded.push(other),
+        }
+    }
 
     let name = if encoded.is_empty() {
         "sqlite".to_string()
@@ -159,12 +165,25 @@ mod tests {
     fn sqlite_encodes_full_path() {
         assert_eq!(
             sqlite_object_name(Path::new(r"D:\data\app.db")),
-            "D__data_app.sqlite.zst.age"
+            "D__data_app.db.sqlite.zst.age"
         );
         assert_eq!(
             sqlite_object_name(Path::new("/var/lib/app.db")),
-            "var_lib_app.sqlite.zst.age"
+            "var_lib_app.db.sqlite.zst.age"
         );
+    }
+
+    #[test]
+    fn sqlite_encoding_does_not_collide() {
+        let a = sqlite_object_name(Path::new(r"D:\a\app.db"));
+        let b = sqlite_object_name(Path::new(r"D:\a_app.db"));
+        let c = sqlite_object_name(Path::new(r"D:\a\app.sqlite3"));
+
+        assert_eq!(a, "D__a_app.db.sqlite.zst.age");
+        assert_eq!(b, "D__a__app.db.sqlite.zst.age");
+        assert_eq!(c, "D__a_app.sqlite3.sqlite.zst.age");
+        assert_ne!(a, b, "下划线不能被当成路径分隔符");
+        assert_ne!(a, c, "不同扩展名不能撞名");
     }
 
     #[test]

@@ -114,6 +114,9 @@ pub async fn run_backup(cfg: &Config, backup: &Backup, dry_run: bool) -> Result<
         if let Err(err) = retention::apply(&store, &run_prefix, settings.retain_count).await {
             warn!("清理旧备份失败（本次备份已成功）：{err:#}");
         }
+    } else if let Err(err) = retention::reap_orphans(&store, &run_prefix).await {
+        // retain_count = 0 表示不删备份，但失败运行留下的孤儿目录仍要回收
+        warn!("回收孤儿目录失败（本次备份已成功）：{err:#}");
     }
 
     Ok(RunSummary {

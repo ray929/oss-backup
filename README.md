@@ -1,138 +1,148 @@
 # oss-backup
 
-把本地文件与 MySQL / PostgreSQL / SQLite 备份到阿里云 OSS 的单机 CLI 工具。
+Back up local directories and MySQL / PostgreSQL / SQLite databases to Alibaba Cloud OSS.
 
-功能集参考 `D:\Work\webdav-backup`，但上传链路改为**全流式**：归档不落临时文件、不读进内存，内存占用只与分片大小相关。
+Archives are compressed with `zstd`, encrypted with `age`, and uploaded as a single stream: no temp archive file, no reading whole files into memory. Memory usage is bounded by the multipart chunk size, not by the size of the backup.
 
-## 特性
+## Features
 
-- 四类备份：文件目录、MySQL、PostgreSQL、SQLite（热备），一个 `backup` 项可组合多种类型
-- 配置为 JSONC（允许 `//` 注释与尾逗号）；`destination` 与 `backup` 是平级数组，每个 `backup` 引用一个 `destination`，**一个 `destination` 只能被一个 `backup` 引用**（保留计数与运行目录都按 `prefix` 划分，共用会互相删备份）
-- 配置键名严格校验：拼错的字段直接报错，不会被静默忽略
-- 文件类：`walkdir` → glob 排除（每个 `files` 项自带 exclude）→ `tar` → `zstd` → `age` → OSS，边压边传
-  - 目录名规则（如 `node_modules`、`target`）对**任意层级**生效，不只匹配备份根
-  - 含通配符的规则（如 `*.tmp`）同样跨层级匹配
-- 数据库类：`mysqldump` / `pg_dump` / `sqlite3 .backup` 输出直接管道压缩加密，不套 tar
-  - `db.table` 对 MySQL / PostgreSQL 都生效，只导出指定表；`db` 或 `db.*` 导出整库
-  - 导出命令受 `timeout_secs` 约束，超时会被终止并报错，不会无限挂住
-- 层叠配置：`global` → `destination` → `backup`
-- 全量快照，按运行目录保留最近 N 份
-- 上传完成后写 `manifest.json`（含 SHA-256、字节数、条目数），作为“本次运行完整”的提交标记
-- 失败即 `abort()` 放弃分片上传（含 `close` 失败），OSS 上不会留下可见半成品对象
-- 进程级锁防重叠；可选 webhook 告警；明确退出码
+- Four payload types — file trees, MySQL, PostgreSQL, SQLite hot copies — combinable inside one `backup` entry
+- JSONC config: `//` comments and trailing commas are allowed
+- Layered settings: `global` → `destination` → `backup`
+- File trees: `walkdir` → glob exclude → `tar` → `zstd` → `age` → OSS, compressed while uploading
+  - directory-name rules such as `node_modules` or `target` match at **any depth**, not just the backup root
+  - wildcard rules such as `*.tmp` also match across directories
+- Databases: `mysqldump` / `pg_dump` / `sqlite3 .backup` output goes straight into compression, no tar layer
+  - `db.table` selects individual tables for both MySQL and PostgreSQL; `db` or `db.*` dumps the whole database
+  - dump commands are bounded by `timeout_secs` and are killed instead of hanging forever
+- Full snapshots, with "keep the newest N runs" retention
+- `manifest.json` is written last and acts as the "this run is complete" marker
+- Any failure calls `abort()`, including a failed finalize, so no half-visible object is left on OSS
+- Config keys are validated strictly: a misspelled field is an error, not a silent no-op
+- Per-process lock, optional webhook alert, explicit exit codes
 
-## 要求
+## Requirements
 
-- Rust 1.85+
-- `mysqldump` / `pg_dump` / `sqlite3`（按使用的备份类型安装，可用 `global.*_path` 指定完整路径）
+- Rust 1.85+ (to build from source)
+- `mysqldump` / `pg_dump` / `sqlite3` for the payload types you use; full paths can be set through `global.*_path`
 
-## 构建
+## Environment Variables
+
+None. Every credential — the OSS access key pair, the age passphrase, database passwords — is read from the config file, and the log level comes from `global.log_level` only. `RUST_LOG` is deliberately ignored, so that "which credential and which setting was actually used" is never ambiguous.
+
+## Build
 
 ```bash
 cargo build --release
 ```
 
-Windows 静态编译（不依赖 MSVC 运行库）：
+Static Windows binary, with no MSVC runtime dependency:
 
 ```powershell
 $env:RUSTFLAGS='-C target-feature=+crt-static'
 cargo build --release
 ```
 
-## 使用
+Tagged builds (`v*`) are cross-compiled by CI for `x86_64-unknown-linux-musl` and `x86_64-pc-windows-msvc`.
+
+## Usage
 
 ```bash
 cp config.example.json config.json
-# 编辑 config.json，填入 endpoint / bucket / AK/SK / age 口令
+# edit config.json: endpoint, bucket, access keys, age passphrase
 
-# 收紧权限（含 AK/SK 与口令）
-chmod 600 config.json                                     # Linux
+chmod 600 config.json   # Linux: the file holds AK/SK and passphrases
 # icacls "config.json" /inheritance:r /grant:r "%USERNAME%":F   # Windows
 
-oss-backup --config config.json --dry-run    # 只校验配置与连通性，打印计划写入的 key
-oss-backup --config config.json              # 执行备份
-oss-backup --config config.json --background # 日志写入配置文件同目录的 oss-backup.log
+oss-backup --config config.json --dry-run    # validate config and connectivity, print planned keys
+oss-backup --config config.json              # run the backup
+oss-backup --config config.json --background # also log to oss-backup.log next to the config file
 ```
 
-### 退出码
+### Exit Codes
 
-| 码 | 含义 |
+| Code | Meaning |
 |---|---|
-| 0 | 全部成功 |
-| 1 | 部分备份项失败 |
-| 2 | 配置 / 凭据 / 文件权限错误 |
-| 3 | 已有实例在运行（锁被占用） |
+| 0 | all backups succeeded |
+| 1 | at least one backup entry failed |
+| 2 | config / credential / file-permission error |
+| 3 | another instance is already running |
 
-## 对象布局
+## Object Layout
 
 ```
 {prefix}/{YYYYMMDD_HHMMSS}/
-├── files.tar.zst.age             # 文件类
-├── {database}.mysql.zst.age      # MySQL，每个库一个对象
+├── files.tar.zst.age             # file trees
+├── {database}.mysql.zst.age      # MySQL, one object per database
 ├── {database}.pgsql.zst.age      # PostgreSQL
-├── {encoded_path}.sqlite.zst.age # SQLite，完整路径编码避免同名冲突
-└── manifest.json                 # 最后写入
+├── {encoded_path}.sqlite.zst.age # SQLite, full path encoded
+└── manifest.json                 # written last
 ```
 
-- 运行目录只按 `prefix` 分段，`destination` 与 `backup` 是平级配置项
-- SQLite 用完整路径编码：`D:\data\app.db` → `D__data_app.sqlite.zst.age`；路径过长时改用路径哈希
-- 没有 `manifest.json` 的运行目录视为未完成，不参与保留计数；超过 24 小时会被回收
+- Run directories are segmented by `prefix` only. `destination` and `backup` are sibling arrays, and **each destination may be referenced by exactly one backup entry** — sharing one would make two entries delete each other's backups.
+- SQLite objects encode the full path, so same-named files in different directories never collide:
+  - `D:\data\app.db` → `D__data_app.db.sqlite.zst.age`
+  - `_` is escaped as `__`, so `D:\a\app.db` and `D:\a_app.db` stay distinct
+  - names longer than 180 bytes fall back to `{stem}-{hash}.sqlite.zst.age`
+- A run directory without `manifest.json` is treated as incomplete and is not counted by retention.
 
-## 保留策略
+## Retention
 
-`retain_count` 以“运行目录”为单位：保留最新 N 个完整运行，其余逐个删除；`0` 表示永不删除。
-不使用 OSS 生命周期规则（它只能表达“保留 N 天”，表达不了“保留最近 N 份”）。
+`retain_count` counts **run directories**: the newest N complete runs are kept and the rest are deleted one by one. `0` means never delete.
 
-## 加密
+OSS lifecycle rules are not used — they can express "keep N days" but not "keep the newest N runs".
 
-产物使用 [age](https://age-encryption.org/) 口令模式加密（scrypt 派生），可用 `age` / `rage` 解密。
+## Encryption
 
-- 口令只从配置文件读取：`age_passphrase_file` 优先于明文 `age_passphrase`
-- 不读取任何环境变量，避免多账号下“不知道用了哪个凭据”
+Artifacts are encrypted with [age](https://age-encryption.org/) in passphrase mode (scrypt) and are compatible with the `age` and `rage` CLIs.
 
-## 手动恢复
+The passphrase comes from `age_passphrase_file` when set, otherwise from the plaintext `age_passphrase` (a warning is logged at startup).
 
-工具本身不提供恢复命令，产物是标准格式，可离线解开：
+## Manual Restore
+
+There is no restore command; the artifacts are standard formats and can be opened offline.
 
 ```bash
-# 文件类
-age --decrypt -o files.tar.zst files.tar.zst.age    # 按提示输入口令
-zstd -d files.tar.zst                               # 得到 files.tar
-tar -xf files.tar                                   # 条目名形如 D__Documents/a.txt
+# file trees
+age --decrypt -o files.tar.zst files.tar.zst.age
+zstd -d files.tar.zst
+tar -xf files.tar                      # entries look like D__Documents/a.txt
 
-# 数据库类
+# databases
 age --decrypt -o blog.sql.zst blog.mysql.zst.age
-zstd -d blog.sql.zst                                # 得到 blog.sql，直接导入对应数据库
+zstd -d blog.sql.zst                   # import blog.sql into the target database
 ```
 
-前提是 `config.json` 里配置的 age 口令（或其口令文件）仍在手。
+Both require the age passphrase configured in `config.json`.
 
-## 安全说明
+## Security
 
-- `config.json` 是唯一密钥载体（AK/SK + age 口令 + 数据库口令），必须 600 / 仅本人可读
-- 建议为备份单独创建 RAM 子账号，权限收敛到目标 bucket 的 `PutObject` / `AbortMultipartUpload` / `ListObjects` / `DeleteObject`
-- 日志与报错中的 AK/SK 会打码
-- Linux 下权限不合规直接拒绝启动；Windows 下检查 ACL 并给出 `icacls` 收紧命令
+- `config.json` is the only credential store. Keep it at `600` / owner-only: on Linux a looser mode aborts startup, on Windows the ACL is inspected and a tightening command is printed.
+- Use a dedicated RAM user scoped to `PutObject`, `AbortMultipartUpload`, `ListObjects` and `DeleteObject` on the target bucket.
+- Access keys and passphrases are masked in logs and in `Debug` output (first 4 + last 4 characters).
+- Database passwords are passed to child processes through environment variables, never through the command line.
 
-## 开发
+## Debug Commands
 
 ```bash
-cargo fmt --check
+cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-## 限制
+## Release Commands
 
-- 全量快照，不做增量与去重
-- 只支持阿里云 OSS，不暴露 `service` 配置
-- 串行执行各 backup 项，单对象内分片也是串行上传
-- 数据库导出依赖外部命令，且数据库口令以明文写在配置文件中
-- 单次备份预期 < 50GB（默认 `part_size_mb = 16`，OSS 上限 10000 片）
+```bash
+# bump the version in Cargo.toml first
+git tag -a v0.x.y -m "v0.x.y"
+git push origin main
+git push origin v0.x.y      # triggers the CI build and GitHub release
+```
 
-## 已知边界
+## Limitations
 
-- **SQLite 热备会落一份临时快照**：`sqlite3 .backup` 只能写文件，因此每次备份都会在系统临时目录生成一份**未加密**的数据库副本（权限 0600）。进程正常退出时删除；被 `SIGKILL`、断电或任务超时强杀时会残留，需人工清理临时目录
-- **崩溃不会清理 OSS 分片**：`abort()` 只在可捕获的错误路径执行。进程被强杀或断电时，已上传的分片会留在 OSS 上（不可见但计费）。建议给 bucket 配置 `AbortIncompleteMultipartUpload` 生命周期规则兜底
-- **孤儿目录回收依赖 `retain_count > 0`**：某次运行失败后留下的无 `manifest.json` 目录，只在下次成功备份且 `retain_count` 不为 0 时按 24 小时规则回收；`retain_count = 0`（默认）时永不回收
-- **`--dry-run` 只验证列举权限**：确认的是 `ListObjects` 可用，不等于账号有 `PutObject` 权限
+- Full snapshots only; no incremental backup or deduplication
+- Alibaba Cloud OSS only
+- Backup entries run sequentially, and multipart parts of a single object upload sequentially
+- Database dumps depend on external binaries, and database passwords are stored in plaintext in the config file
+- A single backup is expected to stay under 50GB (default `part_size_mb = 16`, OSS caps a multipart upload at 10000 parts)

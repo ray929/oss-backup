@@ -65,20 +65,27 @@ pub fn select_deletions(
         deletions.push(name.clone());
     }
 
+    deletions.extend(select_orphans(runs, now));
+
+    deletions
+}
+
+/// 选出超过宽限期仍无 manifest 的孤儿运行目录
+pub fn select_orphans(runs: &BTreeMap<String, RunInfo>, now: NaiveDateTime) -> Vec<String> {
+    let mut orphans = Vec::new();
     for (name, info) in runs {
         if info.has_manifest {
             continue;
         }
         match parse_timestamp(name) {
             Some(ts) if now - ts > Duration::hours(ORPHAN_GRACE_HOURS) => {
-                deletions.push(name.clone());
+                orphans.push(name.clone())
             }
             Some(_) => {}
             None => warn!(run = %name, "运行目录名无法解析为时间戳，跳过清理"),
         }
     }
-
-    deletions
+    orphans
 }
 
 pub async fn apply(store: &OssStore, backup_prefix: &str, retain: usize) -> Result<()> {
@@ -118,6 +125,38 @@ pub async fn apply(store: &OssStore, backup_prefix: &str, retain: usize) -> Resu
     }
 
     Ok(())
+}
+
+/// 只回收孤儿目录（失败运行的残留），与 `retain_count` 无关。
+///
+/// `retain_count = 0` 表示"永不删除备份"，但孤儿不是备份：它们没有 manifest，
+/// 任何恢复流程都用不上，留着只占空间。所以这条路与保留策略分开走。
+pub async fn reap_orphans(store: &OssStore, backup_prefix: &str) -> Result<usize> {
+    let keys = store
+        .list(backup_prefix)
+        .await
+        .with_context(|| format!("列举备份前缀失败：{backup_prefix}"))?;
+    let runs = group_runs(&keys, backup_prefix);
+    let orphans = select_orphans(&runs, Local::now().naive_local());
+    if orphans.is_empty() {
+        debug!("没有需要回收的孤儿目录");
+        return Ok(0);
+    }
+
+    let mut removed = 0;
+    for name in orphans {
+        let Some(info) = runs.get(&name) else {
+            continue;
+        };
+        for key in &info.keys {
+            if let Err(err) = store.delete(key).await {
+                warn!(key = %key, "删除孤儿对象失败：{err}");
+            }
+        }
+        removed += 1;
+        info!(run = %name, objects = info.keys.len(), "已回收孤儿运行目录");
+    }
+    Ok(removed)
 }
 
 fn parse_timestamp(name: &str) -> Option<NaiveDateTime> {
@@ -178,6 +217,17 @@ mod tests {
         let runs = group_runs(&list, "backups/docs/");
         let now = NaiveDateTime::parse_from_str("20260105_000000", "%Y%m%d_%H%M%S").unwrap();
         assert!(select_deletions(&runs, 5, now).is_empty());
+    }
+
+    #[test]
+    fn select_orphans_never_returns_complete_runs() {
+        let list = keys(&[("20260101_000000", true), ("20260102_000000", false)]);
+        let runs = group_runs(&list, "backups/docs/");
+        let now = NaiveDateTime::parse_from_str("20260105_000000", "%Y%m%d_%H%M%S").unwrap();
+        assert_eq!(
+            select_orphans(&runs, now),
+            vec!["20260102_000000".to_string()]
+        );
     }
 
     #[test]
