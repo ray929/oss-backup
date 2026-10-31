@@ -29,9 +29,10 @@ mod tests {
     use super::*;
     use std::io::Write;
 
-    /// 流式加密 16 MiB，用于验证内存不随数据量增长（channel 只有 4 MiB 容量）。
+    /// 流式加密 8 MiB，用于验证内存不随数据量增长（channel 只有 4 MiB 容量）。
     ///
-    /// 峰值由外部工具测量（Windows: `psutil`/`GetProcessMemoryInfo` 读 PeakWorkingSet），
+    /// 数据量压到 8 MiB 是为了控制 CI 时间：debug 构建下 scrypt 派生 + 逐块加密
+    /// 在 CI 机器上要十几秒。峰值由外部工具另外测量（GetProcessMemoryInfo），
     /// 64 MiB 输入时实测约 76 MiB，其中 64 MiB 是 scrypt 的工作区。
     #[test]
     fn encrypts_stream_without_buffering_everything() {
@@ -39,7 +40,7 @@ mod tests {
         let producer = std::thread::spawn(move || {
             let mut writer = encrypt(ChunkSink::new(tx), "test-passphrase").unwrap();
             let block = vec![0xa5u8; 1 << 20];
-            for _ in 0..16 {
+            for _ in 0..8 {
                 writer.write_all(&block).unwrap();
             }
             // StreamWriter::finish 收尾加密，再关掉底层 sink 触发上传侧结束
@@ -55,7 +56,7 @@ mod tests {
         });
         producer.join().unwrap();
 
-        // 密文略大于明文（header + AEAD tag），至少要有 16 MiB
-        assert!(total >= 16 << 20, "unexpected ciphertext size: {total}");
+        // 密文略大于明文（header + AEAD tag），至少要有 8 MiB
+        assert!(total >= 8 << 20, "unexpected ciphertext size: {total}");
     }
 }

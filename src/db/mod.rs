@@ -98,9 +98,10 @@ pub(crate) fn stream_command(
 
     if timed_out.load(Ordering::SeqCst) {
         kill_and_reap(&child);
+        // 用小数秒：timeout 可能是亚秒级的，as_secs() 会截成 "0 秒"
         bail!(
-            "{program} 超过 {} 秒未结束，已终止（检查数据库是否锁等待或网络不通）",
-            timeout.as_secs()
+            "{program} 超过 {:.1} 秒未结束，已终止（检查数据库是否锁等待或网络不通）",
+            timeout.as_secs_f64()
         );
     }
 
@@ -192,7 +193,12 @@ mod tests {
         assert!(tail.ends_with("line30"));
     }
 
-    /// 用 `sleep` 模拟挂死的导出进程；只在 unix 上跑（CI 是 ubuntu）
+    /// 用 `sleep` 模拟挂死的导出进程；只在 unix 上跑（CI 是 ubuntu）。
+    ///
+    /// 计时基准不能卡得太紧：`stream_command` 在开始读 stdout 之前要先做 age 的
+    /// scrypt 派生，debug 构建下这一步在 CI 机器上要好几秒。这里用 60 秒的
+    /// sleep 和 45 秒的上限——kill 生效时耗时只等于派生时间，没生效则必然要
+    /// 等满 60 秒，两者区分度足够。
     #[cfg(unix)]
     #[test]
     fn stream_command_kills_hung_process() {
@@ -200,7 +206,7 @@ mod tests {
         use std::time::Instant;
 
         let mut cmd = Command::new("sleep");
-        cmd.arg("30");
+        cmd.arg("60");
         let (tx, _rx) = tokio::sync::mpsc::channel::<Vec<u8>>(4);
 
         let started = Instant::now();
@@ -209,8 +215,9 @@ mod tests {
 
         assert!(err.to_string().contains("未结束"), "{err}");
         assert!(
-            started.elapsed() < std::time::Duration::from_secs(10),
-            "看门狗没有及时终止子进程"
+            started.elapsed() < std::time::Duration::from_secs(45),
+            "看门狗没有及时终止子进程，耗时 {:?}",
+            started.elapsed()
         );
     }
 }
