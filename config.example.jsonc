@@ -25,7 +25,10 @@
     // "sqlite3_path": "C:/sqlite/sqlite3.exe"
   },
 
-  // destination 与 backup 是平级数组；每个 backup 只引用一个 destination
+  // destination 与 backup 是平级数组。
+  // backup 不写 destination 时，使用这里定义的第一个。
+  // 同一个 destination 被多个 backup 引用时，每个 backup 必须写 name
+  // （name 会成为 OSS 上的一级目录，避免两项互相删备份）。
   "destination": [
     {
       "name": "aliyun",
@@ -41,7 +44,14 @@
   ],
 
   "backup": [
+    // 想拆成多个文件维护时，把 {"import": "路径"} 放进这个数组即可，
+    // 目标文件里的 backup 项会被展开到这里；相对路径以本文件所在目录为基准。
+    // 被导入文件可以是 backup 项数组，也可以是只含 "backup" 键的对象。
+    // { "import": "backups/databases.jsonc" },
+
     {
+      // 同一 destination 被多个 backup 共用时必填；整份配置只有一个 backup 时可省略
+      "name": "docs",
       "destination": "aliyun",
       "retain_count": 3,
 

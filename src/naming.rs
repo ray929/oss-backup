@@ -24,18 +24,18 @@ pub fn is_valid_name(s: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
-/// 运行目录：`{prefix}/{timestamp}`
-pub fn run_dir(prefix: Option<&str>, timestamp: &str) -> String {
-    join_key(&[prefix.unwrap_or(""), timestamp])
+/// 运行目录：`{prefix}/{name}/{timestamp}`；name 省略时少一层
+pub fn run_dir(prefix: Option<&str>, name: Option<&str>, timestamp: &str) -> String {
+    join_key(&[prefix.unwrap_or(""), name.unwrap_or(""), timestamp])
 }
 
-/// 保留策略的列举前缀：`{prefix}/`；未配置 prefix 时为整个 bucket
-pub fn run_prefix(prefix: Option<&str>) -> String {
-    let trimmed = prefix.unwrap_or("").trim_matches('/');
-    if trimmed.is_empty() {
+/// 保留策略的列举前缀：`{prefix}/{name}/`；都没配时为整个 bucket
+pub fn run_prefix(prefix: Option<&str>, name: Option<&str>) -> String {
+    let base = join_key(&[prefix.unwrap_or(""), name.unwrap_or("")]);
+    if base.is_empty() {
         String::new()
     } else {
-        format!("{trimmed}/")
+        format!("{base}/")
     }
 }
 
@@ -144,12 +144,18 @@ mod tests {
     #[test]
     fn runs_dir_layout() {
         assert_eq!(
-            run_dir(Some("backups"), "20260101_010101"),
+            run_dir(Some("backups"), None, "20260101_010101"),
             "backups/20260101_010101"
         );
-        assert_eq!(run_dir(None, "20260101_010101"), "20260101_010101");
-        assert_eq!(run_prefix(Some("backups")), "backups/");
-        assert_eq!(run_prefix(None), "");
+        assert_eq!(
+            run_dir(Some("backups"), Some("docs"), "20260101_010101"),
+            "backups/docs/20260101_010101"
+        );
+        assert_eq!(run_dir(None, None, "20260101_010101"), "20260101_010101");
+        assert_eq!(run_prefix(Some("backups"), None), "backups/");
+        assert_eq!(run_prefix(Some("backups"), Some("docs")), "backups/docs/");
+        assert_eq!(run_prefix(None, Some("docs")), "docs/");
+        assert_eq!(run_prefix(None, None), "");
     }
 
     #[test]

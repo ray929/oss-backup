@@ -22,10 +22,11 @@ pub async fn run_backup(cfg: &Config, backup: &Backup, dry_run: bool) -> Result<
     let store = OssStore::new(destination, Duration::from_secs(settings.timeout_secs))?;
 
     let prefix = destination.prefix.as_deref();
-    let run_prefix = naming::run_prefix(prefix);
+    let name = backup.name.as_deref();
+    let run_prefix = naming::run_prefix(prefix, name);
     let started_at = Local::now();
     let timestamp = started_at.format(naming::TIMESTAMP_FORMAT).to_string();
-    let run_dir = naming::run_dir(prefix, &timestamp);
+    let run_dir = naming::run_dir(prefix, name, &timestamp);
     let part_size = settings.part_size_mb as usize * 1024 * 1024;
 
     if dry_run {
@@ -80,7 +81,7 @@ pub async fn run_backup(cfg: &Config, backup: &Backup, dry_run: bool) -> Result<
             .extend(run_sqlite(&store, &backup.sqlite, &settings, &run_dir, &sqlite3_path).await?);
     }
     if objects.is_empty() {
-        bail!("backup '{}' 没有可执行的备份类型", backup.destination);
+        bail!("backup '{}' 没有可执行的备份类型", destination.name);
     }
 
     let finished_at = Local::now();
@@ -88,7 +89,7 @@ pub async fn run_backup(cfg: &Config, backup: &Backup, dry_run: bool) -> Result<
     let kind = kinds_of(backup);
     let manifest = Manifest::new(
         &kind,
-        &backup.destination,
+        &destination.name,
         started_at.to_rfc3339(),
         finished_at.to_rfc3339(),
         settings.zstd_level,
@@ -472,7 +473,8 @@ mod tests {
     #[test]
     fn planned_objects_for_sqlite_follow_paths() {
         let backup = Backup {
-            destination: "aliyun".into(),
+            name: None,
+            destination: Some("aliyun".into()),
             retain_count: None,
             zstd_level: None,
             part_size_mb: None,
@@ -493,7 +495,8 @@ mod tests {
     fn kinds_combine_file_and_sqlite() {
         let mut cfg = config_with_file();
         let backup = Backup {
-            destination: "aliyun".into(),
+            name: None,
+            destination: Some("aliyun".into()),
             retain_count: None,
             zstd_level: None,
             part_size_mb: None,
@@ -516,7 +519,8 @@ mod tests {
     #[test]
     fn inputs_carry_excludes_per_source() {
         let backup = Backup {
-            destination: "aliyun".into(),
+            name: None,
+            destination: Some("aliyun".into()),
             retain_count: None,
             zstd_level: None,
             part_size_mb: None,

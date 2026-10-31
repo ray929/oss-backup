@@ -56,7 +56,7 @@ async fn run() -> i32 {
     let _lock = if args.dry_run {
         None
     } else {
-        match lock::acquire(&args.config) {
+        match lock::acquire() {
             Ok(lock) => Some(lock),
             Err(err) => {
                 error!("{err:#}");
@@ -67,17 +67,28 @@ async fn run() -> i32 {
 
     let mut failures = Vec::new();
     for backup in &cfg.backup {
+        // name 优先；省略时退回实际使用的 destination 名（可能是默认的第一个）
+        let label = backup
+            .name
+            .clone()
+            .or_else(|| backup.destination.clone())
+            .unwrap_or_else(|| {
+                cfg.destination(backup)
+                    .map(|d| d.name.clone())
+                    .unwrap_or_else(|_| "<unknown>".to_string())
+            });
+
         match backup::run_backup(&cfg, backup, args.dry_run).await {
             Ok(summary) => info!(
-                destination = %backup.destination,
+                backup = %label,
                 objects = summary.objects,
                 bytes = summary.total_bytes,
                 "备份项完成"
             ),
             Err(err) => {
-                error!(destination = %backup.destination, "备份失败：{err:#}");
+                error!(backup = %label, "备份失败：{err:#}");
                 failures.push(notify::NotifyFailure {
-                    name: format!("{} [{}]", backup.destination, backup::kinds_of(backup)),
+                    name: format!("{label} [{}]", backup::kinds_of(backup)),
                     error: format!("{err:#}"),
                 });
             }

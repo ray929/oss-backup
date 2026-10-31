@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
-use std::collections::HashSet;
-use std::path::Path;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 pub mod model;
 
@@ -24,16 +24,14 @@ pub struct BackupSettings {
 impl Config {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref();
-        if !path.exists() {
-            bail!(
-                "配置文件不存在：{}\n请参考 config.example.jsonc 创建",
-                path.display()
-            );
-        }
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("读取配置文件失败：{}", path.display()))?;
-        let value = jsonc_parser::parse_to_serde_value(&text, &Default::default())
-            .with_context(|| format!("解析配置文件失败：{}", path.display()))?;
+        let mut value = load_value(path)
+            .with_context(|| "无法加载主配置文件，可从 config.example.jsonc 复制一份")?;
+        let base_dir = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let mut stack = vec![canonical_key(path)];
+        expand_imports(&mut value, base_dir, &mut stack, 0)?;
         serde_json::from_value(value)
             .with_context(|| format!("配置文件字段不合法：{}", path.display()))
     }
@@ -74,27 +72,40 @@ impl Config {
             }
         }
 
-        let mut used_destinations: HashSet<&str> = HashSet::new();
+        // 先解析每项实际使用的 destination（省略即第一个），并统计被引用次数
+        let mut effective: Vec<&str> = Vec::with_capacity(self.backup.len());
+        let mut usage: HashMap<&str, usize> = HashMap::new();
         for (idx, backup) in self.backup.iter().enumerate() {
-            if !self
-                .destination
-                .iter()
-                .any(|d| d.name == backup.destination)
-            {
-                bail!(
-                    "backup[{idx}] 引用了不存在的 destination '{}'",
-                    backup.destination
-                );
-            }
+            let dest = self
+                .destination(backup)
+                .with_context(|| format!("backup[{idx}] 的 destination 无法解析"))?;
+            effective.push(dest.name.as_str());
+            *usage.entry(dest.name.as_str()).or_insert(0) += 1;
+        }
 
-            // 运行目录与保留计数都以 destination.prefix 为命名空间。一个 destination 被
-            // 多个 backup 项共用时，两项会按各自的 retain_count 删掉对方的备份；同一秒
-            // 启动时还会写进同一个运行目录，manifest 相互覆盖。因此强制一对一。
-            if !used_destinations.insert(backup.destination.as_str()) {
-                bail!(
-                    "backup[{idx}] 与前面的项重复引用 destination '{}'；每个 destination 只能出现一次",
-                    backup.destination
-                );
+        let mut names: HashSet<(&str, &str)> = HashSet::new();
+        for (idx, backup) in self.backup.iter().enumerate() {
+            let dest_name = effective[idx];
+            let shared = usage.get(dest_name).copied().unwrap_or(0) > 1;
+
+            // 一个 destination 被多项共用时，运行目录必须靠 name 区分，否则
+            // retention 会按同一命名空间互删，同秒启动还会覆盖 manifest。
+            match &backup.name {
+                Some(name) => {
+                    if !crate::naming::is_valid_name(name) {
+                        bail!(
+                            "backup[{idx}].name '{name}' 非法（只允许字母、数字、点、下划线、短横线）"
+                        );
+                    }
+                    if !names.insert((dest_name, name.as_str())) {
+                        bail!("destination '{dest_name}' 下的 backup 名称重复：{name}");
+                    }
+                }
+                None if shared => bail!(
+                    "destination '{dest_name}' 被 {} 个 backup 共用，backup[{idx}] 必须设置 name",
+                    usage[dest_name]
+                ),
+                None => {}
             }
 
             let kinds = [
@@ -133,11 +144,16 @@ impl Config {
         Ok(())
     }
 
+    /// 解析 backup 实际使用的 destination：显式指定，否则取配置里的第一个
     pub fn destination(&self, backup: &Backup) -> Result<&Destination> {
-        self.destination
-            .iter()
-            .find(|d| d.name == backup.destination)
-            .with_context(|| format!("找不到 destination '{}'", backup.destination))
+        match backup.destination.as_deref() {
+            Some(name) => self
+                .destination
+                .iter()
+                .find(|d| d.name == name)
+                .with_context(|| format!("找不到 destination '{name}'")),
+            None => self.destination.first().context("配置缺少 destination"),
+        }
     }
 
     pub fn settings(&self, backup: &Backup) -> Result<BackupSettings> {
@@ -228,6 +244,137 @@ impl Config {
             }
             _ => bail!("未配置 age 口令（age_passphrase_file 或 age_passphrase）"),
         }
+    }
+}
+
+const MAX_IMPORT_DEPTH: usize = 8;
+
+fn canonical_key(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn load_value(path: &Path) -> Result<serde_json::Value> {
+    if !path.exists() {
+        bail!("配置文件不存在：{}", path.display());
+    }
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("读取配置文件失败：{}", path.display()))?;
+    jsonc_parser::parse_to_serde_value(&text, &Default::default())
+        .with_context(|| format!("解析配置文件失败：{}", path.display()))
+}
+
+/// 把 backup 数组里的 `{"import": "path"}` 展开成被引用文件中的 backup 项。
+///
+/// 被引用文件可以是 backup 项数组，也可以是只含 `backup` 键的对象；其中若还有
+/// import 会继续递归展开。相对路径以**引用方文件所在目录**为基准；
+/// 循环引用和超过 8 层嵌套直接报错。
+fn expand_imports(
+    value: &mut serde_json::Value,
+    base_dir: &Path,
+    stack: &mut Vec<PathBuf>,
+    depth: usize,
+) -> Result<()> {
+    if depth > MAX_IMPORT_DEPTH {
+        bail!("import 嵌套超过 {MAX_IMPORT_DEPTH} 层，检查是否写成了链式引用");
+    }
+    if let Some(backups) = value.get_mut("backup").and_then(|v| v.as_array_mut()) {
+        expand_items(backups, base_dir, stack, depth)?;
+    }
+    Ok(())
+}
+
+fn expand_items(
+    items: &mut Vec<serde_json::Value>,
+    base_dir: &Path,
+    stack: &mut Vec<PathBuf>,
+    depth: usize,
+) -> Result<()> {
+    if depth > MAX_IMPORT_DEPTH {
+        bail!("import 嵌套超过 {MAX_IMPORT_DEPTH} 层，检查是否写成了链式引用");
+    }
+
+    let mut expanded = Vec::with_capacity(items.len());
+    for item in items.drain(..) {
+        let Some(rel) = parse_import(&item)? else {
+            expanded.push(item);
+            continue;
+        };
+
+        let path = if Path::new(&rel).is_absolute() {
+            PathBuf::from(&rel)
+        } else {
+            base_dir.join(&rel)
+        };
+        let key = canonical_key(&path);
+        if stack.contains(&key) {
+            bail!("import 循环引用：{}", path.display());
+        }
+
+        let sub = load_value(&path)?;
+        let sub_dir = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let mut sub_items = import_items(sub, &path)?;
+
+        stack.push(key);
+        expand_items(&mut sub_items, sub_dir, stack, depth + 1)?;
+        stack.pop();
+
+        expanded.extend(sub_items);
+    }
+
+    *items = expanded;
+    Ok(())
+}
+
+/// 只识别严格的 `{"import": "..."}`；带其他键就报错，避免语义含糊
+fn parse_import(item: &serde_json::Value) -> Result<Option<String>> {
+    let Some(obj) = item.as_object() else {
+        return Ok(None);
+    };
+    let Some(import) = obj.get("import") else {
+        return Ok(None);
+    };
+    if obj.len() != 1 {
+        let keys: Vec<&str> = obj.keys().map(|k| k.as_str()).collect();
+        bail!("import 项不能带其他字段，当前为 {keys:?}");
+    }
+    match import.as_str() {
+        Some(path) if !path.trim().is_empty() => Ok(Some(path.to_string())),
+        _ => bail!("import 必须是非空字符串路径，当前为 {import}"),
+    }
+}
+
+fn import_items(value: serde_json::Value, path: &Path) -> Result<Vec<serde_json::Value>> {
+    match value {
+        serde_json::Value::Array(items) => Ok(items),
+        serde_json::Value::Object(mut obj) => {
+            let extra: Vec<String> = obj
+                .keys()
+                .filter(|k| k.as_str() != "backup")
+                .cloned()
+                .collect();
+            if !extra.is_empty() {
+                bail!(
+                    "被导入文件 {} 只能包含 backup 项数组，或只含 backup 键的对象；多出：{}",
+                    path.display(),
+                    extra.join(", ")
+                );
+            }
+            match obj.remove("backup") {
+                Some(serde_json::Value::Array(items)) => Ok(items),
+                Some(other) => bail!(
+                    "被导入文件 {} 的 backup 必须是数组，当前为 {other}",
+                    path.display()
+                ),
+                None => bail!("被导入文件 {} 缺少 backup 键", path.display()),
+            }
+        }
+        other => bail!(
+            "被导入文件 {} 顶层必须是数组或对象，当前为 {other}",
+            path.display()
+        ),
     }
 }
 
@@ -370,7 +517,7 @@ mod tests {
     #[test]
     fn rejects_unknown_destination() {
         let mut cfg = minimal();
-        cfg.backup[0].destination = "nope".into();
+        cfg.backup[0].destination = Some("nope".into());
         assert!(cfg.validate().is_err());
     }
 
@@ -382,14 +529,102 @@ mod tests {
     }
 
     #[test]
-    fn rejects_two_backups_on_same_destination() {
+    fn rejects_shared_destination_without_name() {
         let mut cfg = minimal();
         let mut second = cfg.backup[0].clone();
         second.files.clear();
         second.sqlite = vec![PathBuf::from("a.db")];
         cfg.backup.push(second);
         let err = cfg.validate().unwrap_err().to_string();
-        assert!(err.contains("每个 destination 只能出现一次"), "{err}");
+        assert!(err.contains("必须设置 name"), "{err}");
+    }
+
+    #[test]
+    fn allows_shared_destination_when_named() {
+        let mut cfg = minimal();
+        cfg.backup[0].name = Some("docs".into());
+        let mut second = cfg.backup[0].clone();
+        second.name = Some("db".into());
+        second.files.clear();
+        second.sqlite = vec![PathBuf::from("a.db")];
+        cfg.backup.push(second);
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn missing_destination_falls_back_to_first() {
+        let mut cfg = minimal();
+        cfg.backup[0].destination = None;
+        assert!(cfg.validate().is_ok());
+        assert_eq!(cfg.destination(&cfg.backup[0]).unwrap().name, "aliyun");
+    }
+
+    #[test]
+    fn imports_backup_items_from_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("extra.jsonc"),
+            r#"[{ "name": "extra", "destination": "aliyun", "sqlite": ["D:/a.db"] }]"#,
+        )
+        .unwrap();
+
+        let main = dir.path().join("config.jsonc");
+        std::fs::write(
+            &main,
+            r#"{
+  "global": { "age_passphrase": "pw" },
+  "destination": [{ "name": "aliyun", "endpoint": "e", "bucket": "b", "access_key_id": "id", "access_key_secret": "sec" }],
+  "backup": [
+    { "import": "extra.jsonc" },
+    { "name": "docs", "destination": "aliyun", "files": [{ "local_path": "D:/docs" }] }
+  ]
+}"#,
+        )
+        .unwrap();
+
+        let cfg = Config::load(&main).unwrap();
+        assert_eq!(cfg.backup.len(), 2);
+        assert_eq!(cfg.backup[0].name.as_deref(), Some("extra"));
+        assert_eq!(cfg.backup[1].name.as_deref(), Some("docs"));
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn example_config_parses() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config.example.jsonc");
+        let cfg = Config::load(&path).expect("示例配置必须能被解析");
+        assert_eq!(cfg.backup.len(), 1);
+        assert_eq!(cfg.backup[0].name.as_deref(), Some("docs"));
+    }
+
+    #[test]
+    fn rejects_import_cycle() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.jsonc");
+        let b = dir.path().join("b.jsonc");
+        std::fs::write(
+            &a,
+            r#"{ "global": {"age_passphrase":"pw"}, "destination": [], "backup": [{ "import": "b.jsonc" }] }"#,
+        )
+        .unwrap();
+        std::fs::write(&b, r#"[{ "import": "a.jsonc" }]"#).unwrap();
+
+        let err = Config::load(&a).unwrap_err().to_string();
+        assert!(err.contains("循环引用"), "{err}");
+    }
+
+    #[test]
+    fn rejects_import_with_extra_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("config.jsonc");
+        std::fs::write(
+            &p,
+            r#"{ "global": {"age_passphrase":"pw"}, "destination": [], "backup": [{ "import": "x.jsonc", "name": "n" }] }"#,
+        )
+        .unwrap();
+
+        let err = Config::load(&p).unwrap_err().to_string();
+        assert!(err.contains("不能带其他字段"), "{err}");
     }
 
     #[test]

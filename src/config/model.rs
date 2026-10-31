@@ -102,7 +102,10 @@ impl fmt::Debug for Destination {
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Backup {
-    pub destination: String,
+    /// 同一 destination 被多个 backup 引用时必填，并作为 OSS 上的一级路径段
+    pub name: Option<String>,
+    /// 省略时使用配置里第一个 destination
+    pub destination: Option<String>,
     pub retain_count: Option<usize>,
     pub zstd_level: Option<i32>,
     pub part_size_mb: Option<u64>,
@@ -122,6 +125,7 @@ pub struct Backup {
 impl fmt::Debug for Backup {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Backup")
+            .field("name", &self.name)
             .field("destination", &self.destination)
             .field("retain_count", &self.retain_count)
             .field("zstd_level", &self.zstd_level)

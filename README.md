@@ -9,6 +9,9 @@ Archives are compressed with `zstd`, encrypted with `age`, and uploaded as a sin
 - Four payload types — file trees, MySQL, PostgreSQL, SQLite hot copies — combinable inside one `backup` entry
 - JSONC config: `//` comments and trailing commas are allowed
 - Layered settings: `global` → `destination` → `backup`
+- A backup may omit `destination` and falls back to the first one; when several backups share one destination, each must set `name`, which becomes a path segment
+- Split a config across files by putting `{"import": "path"}` inside the `backup` array
+- Only one instance runs at a time, even with different config files
 - File trees: `walkdir` → glob exclude → `tar` → `zstd` → `age` → OSS, compressed while uploading
   - directory-name rules such as `node_modules` or `target` match at **any depth**, not just the backup root
   - wildcard rules such as `*.tmp` also match across directories
@@ -71,7 +74,8 @@ oss-backup --config config.jsonc --background # also log to oss-backup.log next 
 ## Object Layout
 
 ```
-{prefix}/{YYYYMMDD_HHMMSS}/
+{prefix}/{timestamp}/            # a single backup on this destination
+{prefix}/{name}/{timestamp}/     # several backups share this destination
 ├── files.tar.zst.age             # file trees
 ├── {database}.mysql.zst.age      # MySQL, one object per database
 ├── {database}.pgsql.zst.age      # PostgreSQL
@@ -79,7 +83,7 @@ oss-backup --config config.jsonc --background # also log to oss-backup.log next 
 └── manifest.json                 # written last
 ```
 
-- Run directories are segmented by `prefix` only. `destination` and `backup` are sibling arrays, and **each destination may be referenced by exactly one backup entry** — sharing one would make two entries delete each other's backups.
+- `destination` and `backup` are sibling arrays. A backup without `destination` uses the first one; if several backups end up on the same destination, **each must set `name`**, and `name` becomes the directory between `prefix` and the timestamp. This is what keeps their retention counters apart.
 - SQLite objects encode the full path, so same-named files in different directories never collide:
   - `D:\data\app.db` → `D__data_app.db.sqlite.zst.age`
   - `_` is escaped as `__`, so `D:\a\app.db` and `D:\a_app.db` stay distinct
@@ -88,7 +92,7 @@ oss-backup --config config.jsonc --background # also log to oss-backup.log next 
 
 ## Retention
 
-`retain_count` counts **run directories**: the newest N complete runs are kept and the rest are deleted one by one. `0` means never delete.
+`retain_count` counts **run directories, per backup entry**: the newest N complete runs under that entry's prefix are kept and the rest are deleted one by one. `0` means never delete.
 
 OSS lifecycle rules are not used — they can express "keep N days" but not "keep the newest N runs".
 
