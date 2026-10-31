@@ -25,6 +25,9 @@ jobs:
   build:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: test
+    # 只有这个 job 需要写：创建 Release 并上传产物。test job 保持默认只读。
+    permissions:
+      contents: write
     strategy:
       matrix:
         include:
