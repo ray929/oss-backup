@@ -256,10 +256,12 @@ fn load_value(path: &Path) -> Result<serde_json::Value> {
         .with_context(|| format!("解析配置文件失败：{}", path.display()))
 }
 
-/// 把 backup 数组里的 `{"import": "path"}` 换成被引用文件里的 backup 项对象。
+/// 把 backup 数组里的 `{"import": "path", ...}` 换成被导入文件里的 backup 项，
+/// 并把 import 项上的其余字段合并进去。
 ///
-/// 只展开一层：被导入文件必须是一个完整的 backup 项（与数组里内联的项同构），
-/// 自身不能再写 import，避免配置变成多层引用链、排查时说不清哪一项来自哪个文件。
+/// 只展开一层：被导入文件必须是完整的 backup 项，自身不能再写 import。
+/// 两边都设置了同一字段时报错，不做静默覆盖——"我写的值被别的文件吃掉了"
+/// 是排查起来最费劲的一类配置问题。
 fn expand_imports(value: &mut serde_json::Value, base_dir: &Path) -> Result<()> {
     let Some(backups) = value.get_mut("backup").and_then(|v| v.as_array_mut()) else {
         return Ok(());
@@ -268,13 +270,13 @@ fn expand_imports(value: &mut serde_json::Value, base_dir: &Path) -> Result<()> 
     let mut expanded = Vec::with_capacity(backups.len());
     for item in backups.drain(..) {
         match parse_import(&item)? {
-            Some(rel) => {
+            Some((rel, overrides)) => {
                 let path = if Path::new(&rel).is_absolute() {
                     PathBuf::from(&rel)
                 } else {
                     base_dir.join(&rel)
                 };
-                expanded.push(import_backup(load_value(&path)?, &path)?);
+                expanded.push(merge_import(load_value(&path)?, overrides, &path)?);
             }
             None => expanded.push(item),
         }
@@ -284,39 +286,61 @@ fn expand_imports(value: &mut serde_json::Value, base_dir: &Path) -> Result<()> 
     Ok(())
 }
 
-/// 被导入文件必须是一个 backup 项对象，且自身不能再 import
-fn import_backup(value: serde_json::Value, path: &Path) -> Result<serde_json::Value> {
-    let serde_json::Value::Object(obj) = value else {
+/// 合并被导入文件与 import 项上的内联字段；同名字段一律报错
+fn merge_import(
+    value: serde_json::Value,
+    overrides: serde_json::Map<String, serde_json::Value>,
+    path: &Path,
+) -> Result<serde_json::Value> {
+    let serde_json::Value::Object(mut base) = value else {
         bail!(
             "被导入文件 {} 必须是一个 backup 项对象（形如 {{ destination, files, sqlite }}），不能是数组",
             path.display()
         );
     };
-    if obj.contains_key("import") {
+    if base.contains_key("import") {
         bail!(
             "被导入文件 {} 不能再包含 import：只允许在主配置的 backup 数组里 import 一层",
             path.display()
         );
     }
-    Ok(serde_json::Value::Object(obj))
+
+    let mut conflicts: Vec<String> = overrides
+        .keys()
+        .filter(|key| base.contains_key(key.as_str()))
+        .cloned()
+        .collect();
+    if !conflicts.is_empty() {
+        conflicts.sort_unstable();
+        bail!(
+            "import 项与 {} 都设置了 {}；同一字段只能写在一处",
+            path.display(),
+            conflicts.join(", ")
+        );
+    }
+
+    base.extend(overrides);
+    Ok(serde_json::Value::Object(base))
 }
 
-/// 只识别严格的 `{"import": "..."}`；带其他键就报错，避免语义含糊
-fn parse_import(item: &serde_json::Value) -> Result<Option<String>> {
+/// 拆出 `{"import": "path"}` 与它旁边的其余字段
+fn parse_import(
+    item: &serde_json::Value,
+) -> Result<Option<(String, serde_json::Map<String, serde_json::Value>)>> {
     let Some(obj) = item.as_object() else {
         return Ok(None);
     };
     let Some(import) = obj.get("import") else {
         return Ok(None);
     };
-    if obj.len() != 1 {
-        let keys: Vec<&str> = obj.keys().map(|k| k.as_str()).collect();
-        bail!("import 项不能带其他字段，当前为 {keys:?}");
-    }
-    match import.as_str() {
-        Some(path) if !path.trim().is_empty() => Ok(Some(path.to_string())),
+    let path = match import.as_str() {
+        Some(path) if !path.trim().is_empty() => path.to_string(),
         _ => bail!("import 必须是非空字符串路径，当前为 {import}"),
-    }
+    };
+
+    let mut overrides = obj.clone();
+    overrides.remove("import");
+    Ok(Some((path, overrides)))
 }
 
 /// 校验 `db` / `db.*` / `db.table` 条目，拒绝空段（如 `blog.` 会被解析成空表名）
@@ -575,17 +599,50 @@ mod tests {
     }
 
     #[test]
-    fn rejects_import_with_extra_keys() {
+    fn merges_fields_from_the_import_item() {
         let dir = tempfile::tempdir().unwrap();
-        let p = dir.path().join("config.jsonc");
         std::fs::write(
-            &p,
-            r#"{ "global": {"age_passphrase":"pw"}, "destination": [], "backup": [{ "import": "x.jsonc", "name": "n" }] }"#,
+            dir.path().join("db.jsonc"),
+            r#"{ "destination": "aliyun", "sqlite": ["D:/a.db"] }"#,
+        )
+        .unwrap();
+        let main = dir.path().join("config.jsonc");
+        std::fs::write(
+            &main,
+            r#"{
+  "global": { "age_passphrase": "pw" },
+  "destination": [{ "name": "aliyun", "endpoint": "e", "bucket": "b", "access_key_id": "id", "access_key_secret": "sec" }],
+  "backup": [{ "import": "db.jsonc", "name": "from-main" }]
+}"#,
         )
         .unwrap();
 
-        let err = Config::load(&p).unwrap_err().to_string();
-        assert!(err.contains("不能带其他字段"), "{err}");
+        let cfg = Config::load(&main).unwrap();
+        assert_eq!(cfg.backup.len(), 1);
+        // 主配置补 name，被导入文件提供 destination 与 sqlite
+        assert_eq!(cfg.backup[0].name.as_deref(), Some("from-main"));
+        assert_eq!(cfg.backup[0].destination.as_deref(), Some("aliyun"));
+        assert_eq!(cfg.backup[0].sqlite.len(), 1);
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn rejects_conflicting_import_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("db.jsonc"),
+            r#"{ "name": "from-file", "destination": "aliyun", "sqlite": ["D:/a.db"] }"#,
+        )
+        .unwrap();
+        let main = dir.path().join("config.jsonc");
+        std::fs::write(
+            &main,
+            r#"{ "global": {"age_passphrase":"pw"}, "destination": [], "backup": [{ "import": "db.jsonc", "name": "from-main" }] }"#,
+        )
+        .unwrap();
+
+        let err = Config::load(&main).unwrap_err().to_string();
+        assert!(err.contains("都设置了 name"), "{err}");
     }
 
     #[test]

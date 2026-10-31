@@ -10,7 +10,7 @@ Archives are compressed with `zstd`, encrypted with `age`, and uploaded as a sin
 - JSONC config: `//` comments and trailing commas are allowed
 - Layered settings: `global` → `destination` → `backup`
 - A backup may omit `destination` and falls back to the first one; when several backups share one destination, each must set `name`, which becomes a path segment
-- Split a config across files by putting `{"import": "path"}` in the `backup` array; the imported file holds a single backup entry and may not import further
+- Split a config across files by putting `{"import": "path"}` in the `backup` array; the imported file holds one backup entry, other fields may sit next to `import` and are merged in, and setting the same field in both places is an error
 - Only one instance runs at a time, even with different config files
 - File trees: `walkdir` → glob exclude → `tar` → `zstd` → `age` → OSS, compressed while uploading
   - directory-name rules such as `node_modules` or `target` match at **any depth**, not just the backup root

@@ -46,8 +46,9 @@
   "backup": [
     // 想拆成多个文件维护时，把 {"import": "路径"} 放进这个数组即可。
     // 目标文件里必须是一个完整的 backup 项（可直接写 destination / files / sqlite），
-    // 且它自己不能再 import。相对路径以本文件所在目录为基准。
-    // { "import": "backups/databases.jsonc" },
+    // import 旁边也可以写字段，会与目标文件合并；两边写同一字段会报错。
+    // 目标文件自身不能再 import。相对路径以本文件所在目录为基准。
+    // { "import": "backups/databases.jsonc", "name": "db" },
 
     {
       // 同一 destination 被多个 backup 共用时必填；整份配置只有一个 backup 时可省略
