@@ -30,8 +30,7 @@ impl Config {
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."));
-        let mut stack = vec![canonical_key(path)];
-        expand_imports(&mut value, base_dir, &mut stack, 0)?;
+        expand_imports(&mut value, base_dir)?;
         serde_json::from_value(value)
             .with_context(|| format!("配置文件字段不合法：{}", path.display()))
     }
@@ -247,12 +246,6 @@ impl Config {
     }
 }
 
-const MAX_IMPORT_DEPTH: usize = 8;
-
-fn canonical_key(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
-}
-
 fn load_value(path: &Path) -> Result<serde_json::Value> {
     if !path.exists() {
         bail!("配置文件不存在：{}", path.display());
@@ -263,69 +256,49 @@ fn load_value(path: &Path) -> Result<serde_json::Value> {
         .with_context(|| format!("解析配置文件失败：{}", path.display()))
 }
 
-/// 把 backup 数组里的 `{"import": "path"}` 展开成被引用文件中的 backup 项。
+/// 把 backup 数组里的 `{"import": "path"}` 换成被引用文件里的 backup 项对象。
 ///
-/// 被引用文件可以是 backup 项数组，也可以是只含 `backup` 键的对象；其中若还有
-/// import 会继续递归展开。相对路径以**引用方文件所在目录**为基准；
-/// 循环引用和超过 8 层嵌套直接报错。
-fn expand_imports(
-    value: &mut serde_json::Value,
-    base_dir: &Path,
-    stack: &mut Vec<PathBuf>,
-    depth: usize,
-) -> Result<()> {
-    if depth > MAX_IMPORT_DEPTH {
-        bail!("import 嵌套超过 {MAX_IMPORT_DEPTH} 层，检查是否写成了链式引用");
+/// 只展开一层：被导入文件必须是一个完整的 backup 项（与数组里内联的项同构），
+/// 自身不能再写 import，避免配置变成多层引用链、排查时说不清哪一项来自哪个文件。
+fn expand_imports(value: &mut serde_json::Value, base_dir: &Path) -> Result<()> {
+    let Some(backups) = value.get_mut("backup").and_then(|v| v.as_array_mut()) else {
+        return Ok(());
+    };
+
+    let mut expanded = Vec::with_capacity(backups.len());
+    for item in backups.drain(..) {
+        match parse_import(&item)? {
+            Some(rel) => {
+                let path = if Path::new(&rel).is_absolute() {
+                    PathBuf::from(&rel)
+                } else {
+                    base_dir.join(&rel)
+                };
+                expanded.push(import_backup(load_value(&path)?, &path)?);
+            }
+            None => expanded.push(item),
+        }
     }
-    if let Some(backups) = value.get_mut("backup").and_then(|v| v.as_array_mut()) {
-        expand_items(backups, base_dir, stack, depth)?;
-    }
+
+    *backups = expanded;
     Ok(())
 }
 
-fn expand_items(
-    items: &mut Vec<serde_json::Value>,
-    base_dir: &Path,
-    stack: &mut Vec<PathBuf>,
-    depth: usize,
-) -> Result<()> {
-    if depth > MAX_IMPORT_DEPTH {
-        bail!("import 嵌套超过 {MAX_IMPORT_DEPTH} 层，检查是否写成了链式引用");
+/// 被导入文件必须是一个 backup 项对象，且自身不能再 import
+fn import_backup(value: serde_json::Value, path: &Path) -> Result<serde_json::Value> {
+    let serde_json::Value::Object(obj) = value else {
+        bail!(
+            "被导入文件 {} 必须是一个 backup 项对象（形如 {{ destination, files, sqlite }}），不能是数组",
+            path.display()
+        );
+    };
+    if obj.contains_key("import") {
+        bail!(
+            "被导入文件 {} 不能再包含 import：只允许在主配置的 backup 数组里 import 一层",
+            path.display()
+        );
     }
-
-    let mut expanded = Vec::with_capacity(items.len());
-    for item in items.drain(..) {
-        let Some(rel) = parse_import(&item)? else {
-            expanded.push(item);
-            continue;
-        };
-
-        let path = if Path::new(&rel).is_absolute() {
-            PathBuf::from(&rel)
-        } else {
-            base_dir.join(&rel)
-        };
-        let key = canonical_key(&path);
-        if stack.contains(&key) {
-            bail!("import 循环引用：{}", path.display());
-        }
-
-        let sub = load_value(&path)?;
-        let sub_dir = path
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        let mut sub_items = import_items(sub, &path)?;
-
-        stack.push(key);
-        expand_items(&mut sub_items, sub_dir, stack, depth + 1)?;
-        stack.pop();
-
-        expanded.extend(sub_items);
-    }
-
-    *items = expanded;
-    Ok(())
+    Ok(serde_json::Value::Object(obj))
 }
 
 /// 只识别严格的 `{"import": "..."}`；带其他键就报错，避免语义含糊
@@ -343,38 +316,6 @@ fn parse_import(item: &serde_json::Value) -> Result<Option<String>> {
     match import.as_str() {
         Some(path) if !path.trim().is_empty() => Ok(Some(path.to_string())),
         _ => bail!("import 必须是非空字符串路径，当前为 {import}"),
-    }
-}
-
-fn import_items(value: serde_json::Value, path: &Path) -> Result<Vec<serde_json::Value>> {
-    match value {
-        serde_json::Value::Array(items) => Ok(items),
-        serde_json::Value::Object(mut obj) => {
-            let extra: Vec<String> = obj
-                .keys()
-                .filter(|k| k.as_str() != "backup")
-                .cloned()
-                .collect();
-            if !extra.is_empty() {
-                bail!(
-                    "被导入文件 {} 只能包含 backup 项数组，或只含 backup 键的对象；多出：{}",
-                    path.display(),
-                    extra.join(", ")
-                );
-            }
-            match obj.remove("backup") {
-                Some(serde_json::Value::Array(items)) => Ok(items),
-                Some(other) => bail!(
-                    "被导入文件 {} 的 backup 必须是数组，当前为 {other}",
-                    path.display()
-                ),
-                None => bail!("被导入文件 {} 缺少 backup 键", path.display()),
-            }
-        }
-        other => bail!(
-            "被导入文件 {} 顶层必须是数组或对象，当前为 {other}",
-            path.display()
-        ),
     }
 }
 
@@ -564,7 +505,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("extra.jsonc"),
-            r#"[{ "name": "extra", "destination": "aliyun", "sqlite": ["D:/a.db"] }]"#,
+            r#"{ "name": "extra", "destination": "aliyun", "sqlite": ["D:/a.db"] }"#,
         )
         .unwrap();
 
@@ -598,7 +539,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_import_cycle() {
+    fn rejects_nested_import() {
         let dir = tempfile::tempdir().unwrap();
         let a = dir.path().join("a.jsonc");
         let b = dir.path().join("b.jsonc");
@@ -607,10 +548,30 @@ mod tests {
             r#"{ "global": {"age_passphrase":"pw"}, "destination": [], "backup": [{ "import": "b.jsonc" }] }"#,
         )
         .unwrap();
-        std::fs::write(&b, r#"[{ "import": "a.jsonc" }]"#).unwrap();
+        // 被导入文件里再写 import：只允许一层，必须报错
+        std::fs::write(&b, r#"{ "import": "a.jsonc" }"#).unwrap();
 
         let err = Config::load(&a).unwrap_err().to_string();
-        assert!(err.contains("循环引用"), "{err}");
+        assert!(err.contains("不能再包含 import"), "{err}");
+    }
+
+    #[test]
+    fn rejects_import_of_array() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("list.jsonc"),
+            r#"[{ "sqlite": ["D:/a.db"] }]"#,
+        )
+        .unwrap();
+        let main = dir.path().join("config.jsonc");
+        std::fs::write(
+            &main,
+            r#"{ "global": {"age_passphrase":"pw"}, "destination": [], "backup": [{ "import": "list.jsonc" }] }"#,
+        )
+        .unwrap();
+
+        let err = Config::load(&main).unwrap_err().to_string();
+        assert!(err.contains("必须是一个 backup 项对象"), "{err}");
     }
 
     #[test]

@@ -44,9 +44,9 @@
   ],
 
   "backup": [
-    // 想拆成多个文件维护时，把 {"import": "路径"} 放进这个数组即可，
-    // 目标文件里的 backup 项会被展开到这里；相对路径以本文件所在目录为基准。
-    // 被导入文件可以是 backup 项数组，也可以是只含 "backup" 键的对象。
+    // 想拆成多个文件维护时，把 {"import": "路径"} 放进这个数组即可。
+    // 目标文件里必须是一个完整的 backup 项（可直接写 destination / files / sqlite），
+    // 且它自己不能再 import。相对路径以本文件所在目录为基准。
     // { "import": "backups/databases.jsonc" },
 
     {
